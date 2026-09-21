@@ -88,4 +88,3 @@ All configuration uses `PULSE_`-prefixed environment variables. The checked-in
 `.env.example` lists every setting. Startup fails early when authenticated Teams
 or Groq credentials are missing; secret values are represented as `SecretStr`
 and are never returned by health endpoints.
-
