@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     orbit_business_timezone: str = "Asia/Karachi"
     orbit_max_duration_minutes: int = Field(default=1440, ge=1, le=10080)
     orbit_max_notes_chars: int = Field(default=2000, ge=1, le=10000)
+    orbit_view_page_size: int = Field(default=5, ge=1, le=10)
+    orbit_view_max_range_days: int = Field(default=366, ge=1, le=3660)
     orbit_session_ttl_minutes: int = Field(default=60, ge=5, le=1440)
 
     database_host: str | None = None

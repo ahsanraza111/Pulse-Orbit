@@ -10,8 +10,11 @@ from pulse.application.orbit_models import (
     OrbitProject,
     OrbitSession,
     OrbitTask,
+    OrbitTimesheetEntry,
     ParsedTimesheetDraft,
+    ParsedTimesheetQuery,
     PendingTimesheetEntry,
+    TimesheetEntryBatch,
 )
 
 
@@ -38,9 +41,34 @@ class OrbitTimesheetPort(Protocol):
         self, access_token: str, entry: PendingTimesheetEntry
     ) -> CreatedTimesheetEntry: ...
 
+    async def list_entries(
+        self,
+        access_token: str,
+        *,
+        employee_id: str,
+        start_date: date,
+        end_date: date,
+        project_id: str | None,
+        status: str | None,
+        limit: int,
+        offset: int,
+    ) -> TimesheetEntryBatch: ...
+
+    async def get_entry(
+        self,
+        access_token: str,
+        *,
+        employee_id: str,
+        entry_id: str,
+    ) -> OrbitTimesheetEntry | None: ...
+
 
 class TimesheetDraftParser(Protocol):
     async def parse(self, text: str, *, today: date) -> ParsedTimesheetDraft: ...
+
+
+class TimesheetQueryParser(Protocol):
+    async def parse(self, text: str, *, today: date) -> ParsedTimesheetQuery: ...
 
 
 class OrbitSessionStore(Protocol):

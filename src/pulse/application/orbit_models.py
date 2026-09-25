@@ -59,3 +59,46 @@ class CreatedTimesheetEntry:
     id: str
     entry_date: date
     duration_minutes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedTimesheetQuery:
+    start_date: date
+    end_date: date
+    project_name: str | None = None
+    status: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTimesheetQuery:
+    start_date: date
+    end_date: date
+    project_id: str | None = None
+    project_name: str | None = None
+    status: str | None = None
+    page: int = 0
+    page_size: int = 5
+
+
+@dataclass(frozen=True, slots=True)
+class OrbitTimesheetEntry:
+    id: str
+    entry_date: date
+    duration_minutes: int
+    description: str
+    status: str
+    project_name: str
+    task_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class TimesheetEntryBatch:
+    entries: tuple[OrbitTimesheetEntry, ...]
+    total_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TimesheetEntryPage:
+    query: ResolvedTimesheetQuery
+    entries: tuple[OrbitTimesheetEntry, ...]
+    total_count: int

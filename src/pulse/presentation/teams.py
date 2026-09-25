@@ -5,6 +5,7 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import Mapping
+from datetime import date
 from typing import Any, Literal
 
 from fastapi import FastAPI
@@ -16,7 +17,9 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import App, FastAPIAdapter
 from microsoft_teams.cards import (
+    ActionSet,
     AdaptiveCard,
+    Container,
     ExecuteAction,
     Fact,
     FactSet,
@@ -35,9 +38,19 @@ from pulse.application.errors import (
     OrbitValidationError,
     ProviderError,
 )
-from pulse.application.orbit_models import CreatedTimesheetEntry, PendingTimesheetEntry
+from pulse.application.orbit_models import (
+    CreatedTimesheetEntry,
+    OrbitTimesheetEntry,
+    PendingTimesheetEntry,
+    ResolvedTimesheetQuery,
+    TimesheetEntryPage,
+)
 from pulse.application.services.chat import ChatService
-from pulse.application.services.orbit import OrbitAddEntryService, OrbitAuthService
+from pulse.application.services.orbit import (
+    OrbitAddEntryService,
+    OrbitAuthService,
+    OrbitViewEntriesService,
+)
 from pulse.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -49,6 +62,8 @@ PASSWORD_VALUE_PATTERN = re.compile(
 ORBIT_LOGIN_ACTION = "orbit_login"
 ORBIT_CONFIRM_ACTION = "orbit_confirm"
 ORBIT_CANCEL_ACTION = "orbit_cancel"
+ORBIT_VIEW_PAGE_ACTION = "orbit_view_page"
+ORBIT_VIEW_DETAIL_ACTION = "orbit_view_detail"
 TIME_ENTRY_ACTION_WORDS = {"add", "create", "enter", "log", "record", "worked"}
 TIME_ENTRY_DETAIL_WORDS = {
     "entry",
@@ -59,6 +74,8 @@ TIME_ENTRY_DETAIL_WORDS = {
     "time",
     "timesheet",
 }
+TIME_ENTRY_VIEW_WORDS = {"check", "display", "find", "get", "list", "see", "show", "view"}
+TIME_ENTRY_VIEW_TARGETS = {"entries", "entry", "hours", "time", "timesheet"}
 
 
 class ComposeCardAction(CardAction):
@@ -213,6 +230,172 @@ def orbit_entry_created_card(created: CreatedTimesheetEntry) -> AdaptiveCard:
             f"Reference: `{created.id}`"
         ),
         success=True,
+    )
+
+
+def _query_action_data(query: ResolvedTimesheetQuery, action: str) -> dict[str, object]:
+    data: dict[str, object] = {
+        "action": action,
+        "start_date": query.start_date.isoformat(),
+        "end_date": query.end_date.isoformat(),
+        "page": query.page,
+    }
+    if query.project_id:
+        data["project_id"] = query.project_id
+    if query.status:
+        data["status"] = query.status
+    return data
+
+
+def _truncate_notes(notes: str, limit: int = 140) -> str:
+    normalized = " ".join(notes.split())
+    return normalized if len(normalized) <= limit else normalized[: limit - 1].rstrip() + "…"
+
+
+def orbit_timesheet_list_card(page: TimesheetEntryPage) -> AdaptiveCard:
+    query = page.query
+    filters = [f"{query.start_date.isoformat()} to {query.end_date.isoformat()}"]
+    if query.project_name:
+        filters.append(f"Project: {query.project_name}")
+    if query.status:
+        filters.append(f"Status: {query.status.title()}")
+
+    body: list[Any] = [
+        TextBlock(text="Orbit timesheet", size="Large", weight="Bolder"),
+        TextBlock(text=" · ".join(filters), wrap=True),
+    ]
+    if not page.entries:
+        body.append(
+            TextBlock(
+                text="No timesheet entries were found for these filters.",
+                wrap=True,
+                spacing="Medium",
+            )
+        )
+        return AdaptiveCard(body=body)
+
+    first = query.page * query.page_size + 1
+    last = first + len(page.entries) - 1
+    page_total = sum(entry.duration_minutes for entry in page.entries)
+    body.append(
+        TextBlock(
+            text=(
+                f"Showing {first}-{last} of {page.total_count} · "
+                f"Displayed total: {TeamsMessageHandler._format_duration(page_total)}"
+            ),
+            wrap=True,
+            spacing="Small",
+        )
+    )
+    for entry in page.entries:
+        detail_data = _query_action_data(query, ORBIT_VIEW_DETAIL_ACTION)
+        detail_data["entry_id"] = entry.id
+        body.append(
+            Container(
+                separator=True,
+                spacing="Medium",
+                items=[
+                    TextBlock(
+                        text=(
+                            f"**{entry.entry_date.isoformat()} · "
+                            f"{TeamsMessageHandler._format_duration(entry.duration_minutes)} · "
+                            f"{entry.status.title()}**"
+                        ),
+                        wrap=True,
+                    ),
+                    TextBlock(
+                        text=f"{entry.project_name} — {entry.task_name}",
+                        wrap=True,
+                        spacing="Small",
+                    ),
+                    TextBlock(
+                        text=f"Notes: {_truncate_notes(entry.description) or 'None'}",
+                        wrap=True,
+                        spacing="Small",
+                    ),
+                    ActionSet(
+                        actions=[
+                            ExecuteAction(
+                                title="View details",
+                                verb=ORBIT_VIEW_DETAIL_ACTION,
+                                data=detail_data,
+                            )
+                        ]
+                    ),
+                ],
+            )
+        )
+
+    actions = []
+    if query.page > 0:
+        previous_query = ResolvedTimesheetQuery(
+            start_date=query.start_date,
+            end_date=query.end_date,
+            project_id=query.project_id,
+            project_name=query.project_name,
+            status=query.status,
+            page=query.page - 1,
+            page_size=query.page_size,
+        )
+        actions.append(
+            ExecuteAction(
+                title="Previous",
+                verb=ORBIT_VIEW_PAGE_ACTION,
+                data=_query_action_data(previous_query, ORBIT_VIEW_PAGE_ACTION),
+            )
+        )
+    if last < page.total_count:
+        next_query = ResolvedTimesheetQuery(
+            start_date=query.start_date,
+            end_date=query.end_date,
+            project_id=query.project_id,
+            project_name=query.project_name,
+            status=query.status,
+            page=query.page + 1,
+            page_size=query.page_size,
+        )
+        actions.append(
+            ExecuteAction(
+                title="Next",
+                verb=ORBIT_VIEW_PAGE_ACTION,
+                data=_query_action_data(next_query, ORBIT_VIEW_PAGE_ACTION),
+            )
+        )
+    return AdaptiveCard(body=body, actions=actions)
+
+
+def orbit_timesheet_detail_card(
+    entry: OrbitTimesheetEntry,
+    query: ResolvedTimesheetQuery | None = None,
+) -> AdaptiveCard:
+    actions = []
+    if query is not None:
+        actions.append(
+            ExecuteAction(
+                title="Back to list",
+                verb=ORBIT_VIEW_PAGE_ACTION,
+                data=_query_action_data(query, ORBIT_VIEW_PAGE_ACTION),
+            )
+        )
+    return AdaptiveCard(
+        body=[
+            TextBlock(text="Orbit entry details", size="Large", weight="Bolder"),
+            FactSet(
+                facts=[
+                    Fact(title="Date", value=entry.entry_date.isoformat()),
+                    Fact(title="Project", value=entry.project_name),
+                    Fact(title="Task", value=entry.task_name),
+                    Fact(
+                        title="Duration",
+                        value=TeamsMessageHandler._format_duration(entry.duration_minutes),
+                    ),
+                    Fact(title="Status", value=entry.status.title()),
+                ]
+            ),
+            TextBlock(text="Notes", weight="Bolder", spacing="Medium"),
+            TextBlock(text=entry.description or "No notes", wrap=True, spacing="Small"),
+        ],
+        actions=actions,
     )
 
 
@@ -476,16 +659,205 @@ class OrbitCancelCardHandler:
             self._completed.popitem(last=False)
 
 
+def _resolved_query_from_action(data: Mapping[str, object]) -> ResolvedTimesheetQuery:
+    start_value = data.get("start_date")
+    end_value = data.get("end_date")
+    page_value = data.get("page", 0)
+    project_value = data.get("project_id")
+    status_value = data.get("status")
+    if (
+        not isinstance(start_value, str)
+        or not isinstance(end_value, str)
+        or not isinstance(page_value, int)
+        or isinstance(page_value, bool)
+        or (project_value is not None and not isinstance(project_value, str))
+        or (status_value is not None and not isinstance(status_value, str))
+    ):
+        raise OrbitValidationError("This timesheet navigation action is invalid.")
+    try:
+        start_date = date.fromisoformat(start_value)
+        end_date = date.fromisoformat(end_value)
+    except ValueError as exc:
+        raise OrbitValidationError("This timesheet navigation action is invalid.") from exc
+    return ResolvedTimesheetQuery(
+        start_date=start_date,
+        end_date=end_date,
+        project_id=project_value or None,
+        status=status_value.casefold() if status_value else None,
+        page=page_value,
+        page_size=1,
+    )
+
+
+def _orbit_read_error_card(exc: Exception) -> AdaptiveCard:
+    if isinstance(exc, OrbitAuthRequiredError):
+        message = "Your Orbit account is not linked. Send `orbit login` first."
+    elif isinstance(exc, OrbitAuthenticationError):
+        message = "Orbit authentication failed. Send `orbit login` and try again."
+    elif isinstance(exc, OrbitAmbiguousMatchError):
+        options = ", ".join(exc.options)
+        message = f"Multiple Orbit {exc.entity} matches were found: {options}."
+    elif isinstance(exc, OrbitValidationError | OrbitNotFoundError):
+        message = str(exc)
+    elif isinstance(exc, OrbitProviderError):
+        message = "Orbit is temporarily unavailable. Please try again later."
+    else:
+        message = "Something went wrong while reading your Orbit timesheet."
+    return orbit_status_card("Timesheet unavailable", message)
+
+
+class OrbitViewPageCardHandler:
+    def __init__(self, view_service: OrbitViewEntriesService) -> None:
+        self._view = view_service
+        self._started: OrderedDict[str, None] = OrderedDict()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        data = getattr(getattr(ctx.activity.value, "action", None), "data", None)
+        if not isinstance(data, Mapping):
+            return AdaptiveCardActionCardResponse(
+                value=_orbit_read_error_card(
+                    OrbitValidationError("This timesheet navigation action is invalid.")
+                )
+            )
+        try:
+            query = _resolved_query_from_action(data)
+        except OrbitValidationError as exc:
+            return AdaptiveCardActionCardResponse(value=_orbit_read_error_card(exc))
+
+        operation_id = ":".join(
+            (
+                OrbitLoginCardHandler._submission_id(ctx),
+                query.start_date.isoformat(),
+                query.end_date.isoformat(),
+                query.project_id or "",
+                query.status or "",
+                str(query.page),
+            )
+        )
+        if operation_id not in self._started:
+            self._remember_started(operation_id)
+            task = asyncio.create_task(self._load_and_send(ctx, query))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        return AdaptiveCardActionCardResponse(
+            value=orbit_status_card(
+                "Loading timesheet",
+                "PULSE is loading the requested page and will post it here.",
+                success=True,
+            )
+        )
+
+    async def _load_and_send(self, ctx: Any, query: ResolvedTimesheetQuery) -> None:
+        try:
+            page = await self._view.list_page(teams_user_id(ctx), query)
+            result = orbit_timesheet_list_card(page)
+        except Exception as exc:
+            if not isinstance(
+                exc,
+                (
+                    OrbitAmbiguousMatchError,
+                    OrbitAuthenticationError,
+                    OrbitAuthRequiredError,
+                    OrbitNotFoundError,
+                    OrbitProviderError,
+                    OrbitValidationError,
+                ),
+            ):
+                logger.exception("Unexpected error while loading an Orbit timesheet page")
+            result = _orbit_read_error_card(exc)
+        try:
+            await ctx.send(result)
+        except Exception:
+            logger.exception("Failed to send an Orbit timesheet page")
+
+    def _remember_started(self, operation_id: str) -> None:
+        self._started[operation_id] = None
+        self._started.move_to_end(operation_id)
+        while len(self._started) > 256:
+            self._started.popitem(last=False)
+
+
+class OrbitViewDetailCardHandler:
+    def __init__(self, view_service: OrbitViewEntriesService) -> None:
+        self._view = view_service
+        self._started: OrderedDict[str, None] = OrderedDict()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        data = getattr(getattr(ctx.activity.value, "action", None), "data", None)
+        if not isinstance(data, Mapping) or not isinstance(data.get("entry_id"), str):
+            return AdaptiveCardActionCardResponse(
+                value=_orbit_read_error_card(
+                    OrbitValidationError("This Orbit entry reference is invalid.")
+                )
+            )
+        try:
+            query = _resolved_query_from_action(data)
+        except OrbitValidationError as exc:
+            return AdaptiveCardActionCardResponse(value=_orbit_read_error_card(exc))
+        entry_id = data["entry_id"]
+
+        operation_id = f"{OrbitLoginCardHandler._submission_id(ctx)}:{entry_id}"
+        if operation_id not in self._started:
+            self._remember_started(operation_id)
+            task = asyncio.create_task(self._load_and_send(ctx, entry_id, query))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        return AdaptiveCardActionCardResponse(
+            value=orbit_status_card(
+                "Loading Orbit entry",
+                "PULSE is loading the entry details and will post them here.",
+                success=True,
+            )
+        )
+
+    async def _load_and_send(
+        self,
+        ctx: Any,
+        entry_id: str,
+        query: ResolvedTimesheetQuery,
+    ) -> None:
+        try:
+            entry = await self._view.get_detail(teams_user_id(ctx), entry_id)
+            result = orbit_timesheet_detail_card(entry, query)
+        except Exception as exc:
+            if not isinstance(
+                exc,
+                (
+                    OrbitAuthenticationError,
+                    OrbitAuthRequiredError,
+                    OrbitNotFoundError,
+                    OrbitProviderError,
+                    OrbitValidationError,
+                ),
+            ):
+                logger.exception("Unexpected error while loading Orbit entry details")
+            result = _orbit_read_error_card(exc)
+        try:
+            await ctx.send(result)
+        except Exception:
+            logger.exception("Failed to send Orbit entry details")
+
+    def _remember_started(self, operation_id: str) -> None:
+        self._started[operation_id] = None
+        self._started.move_to_end(operation_id)
+        while len(self._started) > 256:
+            self._started.popitem(last=False)
+
+
 class TeamsMessageHandler:
     def __init__(
         self,
         chat_service: ChatService,
         orbit_auth_service: OrbitAuthService | None = None,
         orbit_add_service: OrbitAddEntryService | None = None,
+        orbit_view_service: OrbitViewEntriesService | None = None,
     ) -> None:
         self._chat_service = chat_service
         self._orbit_auth = orbit_auth_service
         self._orbit_add = orbit_add_service
+        self._orbit_view = orbit_view_service
 
     async def __call__(self, ctx: Any) -> None:
         user_text = clean_teams_text(getattr(ctx.activity, "text", None))
@@ -517,6 +889,7 @@ class TeamsMessageHandler:
             command.startswith("orbit ")
             or command in {"orbit", "confirm", "cancel"}
             or TeamsMessageHandler._is_orbit_login_intent(command)
+            or TeamsMessageHandler._is_time_entry_view_intent(command)
             or TeamsMessageHandler._is_time_entry_intent(command)
         )
 
@@ -535,8 +908,19 @@ class TeamsMessageHandler:
         words = set(re.findall(r"[a-z0-9]+", text.casefold()))
         return bool(words & TIME_ENTRY_ACTION_WORDS and words & TIME_ENTRY_DETAIL_WORDS)
 
+    @staticmethod
+    def _is_time_entry_view_intent(text: str) -> bool:
+        words = set(re.findall(r"[a-z0-9]+", text.casefold()))
+        explicit_view = bool(words & TIME_ENTRY_VIEW_WORDS and words & TIME_ENTRY_VIEW_TARGETS)
+        work_question = bool(
+            "what" in words
+            and words & {"work", "worked"}
+            and words & {"today", "yesterday", "week", "month"}
+        )
+        return explicit_view or work_question
+
     async def _handle_orbit(self, ctx: Any, text: str) -> str | AdaptiveCard:
-        if not self._orbit_auth or not self._orbit_add:
+        if not self._orbit_auth:
             return "Orbit integration is not configured yet."
         current_teams_user_id = teams_user_id(ctx)
         command = text.strip()
@@ -546,10 +930,13 @@ class TeamsMessageHandler:
             if self._is_orbit_login_intent(normalized):
                 return orbit_login_card()
             if normalized == "orbit logout":
-                await self._orbit_add.cancel(current_teams_user_id)
+                if self._orbit_add:
+                    await self._orbit_add.cancel(current_teams_user_id)
                 await self._orbit_auth.logout(current_teams_user_id)
                 return "Your local Orbit session has been removed."
             if normalized in {"confirm", "orbit confirm"}:
+                if not self._orbit_add:
+                    return "Orbit add-entry integration is not configured yet."
                 created = await self._orbit_add.confirm(current_teams_user_id)
                 return (
                     "Orbit entry created successfully. "
@@ -558,13 +945,27 @@ class TeamsMessageHandler:
                     f"reference: `{created.id}`."
                 )
             if normalized in {"cancel", "orbit cancel"}:
+                if not self._orbit_add:
+                    return "Orbit add-entry integration is not configured yet."
                 cancelled = await self._orbit_add.cancel(current_teams_user_id)
                 return (
                     "Pending Orbit entry cancelled."
                     if cancelled
                     else "There is no pending Orbit entry to cancel."
                 )
+            if (
+                normalized.startswith(("orbit entries", "orbit list", "orbit timesheet"))
+                or self._is_time_entry_view_intent(normalized)
+            ):
+                if not self._orbit_view:
+                    return "Orbit timesheet viewing is not configured yet."
+                page = await self._orbit_view.list_from_text(
+                    current_teams_user_id, command
+                )
+                return orbit_timesheet_list_card(page)
             if normalized.startswith("orbit add") or self._is_time_entry_intent(normalized):
+                if not self._orbit_add:
+                    return "Orbit add-entry integration is not configured yet."
                 request = (
                     command[len("orbit add") :].strip()
                     if normalized.startswith("orbit add")
@@ -578,7 +979,7 @@ class TeamsMessageHandler:
                 return orbit_confirmation_card(pending)
             return (
                 "Orbit commands: `orbit login`, `orbit add <details>`, "
-                "`orbit confirm`, `orbit cancel`, and `orbit logout`."
+                "`orbit list`, `orbit confirm`, `orbit cancel`, and `orbit logout`."
             )
         except OrbitAuthRequiredError:
             return "Your Orbit account is not linked. Send `orbit login` first."
@@ -606,6 +1007,7 @@ def register_teams_app(
     chat_service: ChatService,
     orbit_auth_service: OrbitAuthService | None = None,
     orbit_add_service: OrbitAddEntryService | None = None,
+    orbit_view_service: OrbitViewEntriesService | None = None,
 ) -> App:
     adapter = FastAPIAdapter(app=fastapi_app)
     kwargs: dict[str, Any] = {
@@ -625,7 +1027,12 @@ def register_teams_app(
 
     teams_app = App(**kwargs)
     teams_app.on_message(
-        TeamsMessageHandler(chat_service, orbit_auth_service, orbit_add_service)
+        TeamsMessageHandler(
+            chat_service,
+            orbit_auth_service,
+            orbit_add_service,
+            orbit_view_service,
+        )
     )
     if orbit_auth_service:
         teams_app.on_card_action_execute(
@@ -640,5 +1047,14 @@ def register_teams_app(
         teams_app.on_card_action_execute(
             ORBIT_CANCEL_ACTION,
             OrbitCancelCardHandler(orbit_add_service),
+        )
+    if orbit_view_service:
+        teams_app.on_card_action_execute(
+            ORBIT_VIEW_PAGE_ACTION,
+            OrbitViewPageCardHandler(orbit_view_service),
+        )
+        teams_app.on_card_action_execute(
+            ORBIT_VIEW_DETAIL_ACTION,
+            OrbitViewDetailCardHandler(orbit_view_service),
         )
     return teams_app

@@ -17,7 +17,9 @@ from pulse.application.orbit_models import (
     OrbitProject,
     OrbitSession,
     OrbitTask,
+    OrbitTimesheetEntry,
     PendingTimesheetEntry,
+    TimesheetEntryBatch,
 )
 
 
@@ -154,6 +156,78 @@ class SupabaseOrbitClient:
             id=row["id"], entry_date=returned_date, duration_minutes=duration
         )
 
+    async def list_entries(
+        self,
+        access_token: str,
+        *,
+        employee_id: str,
+        start_date: date,
+        end_date: date,
+        project_id: str | None,
+        status: str | None,
+        limit: int,
+        offset: int,
+    ) -> TimesheetEntryBatch:
+        params = {
+            "employee_id": f"eq.{employee_id}",
+            "and": (
+                f"(entry_date.gte.{start_date.isoformat()},"
+                f"entry_date.lte.{end_date.isoformat()})"
+            ),
+            "select": (
+                "id,entry_date,duration_minutes,description,status,"
+                "project:projects(name),task:tasks(name)"
+            ),
+            "order": "entry_date.desc,id.desc",
+            "limit": str(limit),
+            "offset": str(offset),
+        }
+        if project_id:
+            params["project_id"] = f"eq.{project_id}"
+        if status:
+            params["status"] = f"eq.{status}"
+        response = await self._request(
+            "GET",
+            "/rest/v1/timesheet_entries",
+            access_token=access_token,
+            params=params,
+            extra_headers={"Prefer": "count=exact"},
+        )
+        rows = self._json_list(response)
+        entries = tuple(self._parse_timesheet_entry(row) for row in rows)
+        return TimesheetEntryBatch(
+            entries=entries,
+            total_count=self._parse_total_count(response, offset + len(entries)),
+        )
+
+    async def get_entry(
+        self,
+        access_token: str,
+        *,
+        employee_id: str,
+        entry_id: str,
+    ) -> OrbitTimesheetEntry | None:
+        response = await self._request(
+            "GET",
+            "/rest/v1/timesheet_entries",
+            access_token=access_token,
+            params={
+                "id": f"eq.{entry_id}",
+                "employee_id": f"eq.{employee_id}",
+                "select": (
+                    "id,entry_date,duration_minutes,description,status,"
+                    "project:projects(name),task:tasks(name)"
+                ),
+                "limit": "2",
+            },
+        )
+        rows = self._json_list(response)
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise OrbitProviderError("Orbit returned an ambiguous timesheet entry.")
+        return self._parse_timesheet_entry(rows[0])
+
     async def _request(
         self,
         method: str,
@@ -255,4 +329,45 @@ class SupabaseOrbitClient:
                 return date.fromisoformat(value)
             except ValueError:
                 pass
+        return fallback
+
+    @staticmethod
+    def _parse_timesheet_entry(row: dict[str, Any]) -> OrbitTimesheetEntry:
+        entry_id = row.get("id")
+        entry_date_value = row.get("entry_date")
+        duration = row.get("duration_minutes")
+        project = row.get("project")
+        task = row.get("task")
+        if (
+            not isinstance(entry_id, str)
+            or not isinstance(entry_date_value, str)
+            or not isinstance(duration, int)
+            or not isinstance(project, dict)
+            or not isinstance(task, dict)
+            or not isinstance(project.get("name"), str)
+            or not isinstance(task.get("name"), str)
+        ):
+            raise OrbitProviderError("Orbit returned an invalid timesheet entry.")
+        try:
+            entry_date = date.fromisoformat(entry_date_value)
+        except ValueError as exc:
+            raise OrbitProviderError("Orbit returned an invalid timesheet date.") from exc
+        description = row.get("description")
+        status = row.get("status")
+        return OrbitTimesheetEntry(
+            id=entry_id,
+            entry_date=entry_date,
+            duration_minutes=duration,
+            description=description if isinstance(description, str) else "",
+            status=status if isinstance(status, str) and status else "unknown",
+            project_name=project["name"],
+            task_name=task["name"],
+        )
+
+    @staticmethod
+    def _parse_total_count(response: httpx.Response, fallback: int) -> int:
+        content_range = response.headers.get("content-range", "")
+        _, separator, total = content_range.rpartition("/")
+        if separator and total.isdigit():
+            return int(total)
         return fallback

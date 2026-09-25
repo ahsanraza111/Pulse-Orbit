@@ -9,13 +9,21 @@ from microsoft_teams.api import (
 from microsoft_teams.cards import AdaptiveCard
 
 from pulse.application.errors import OrbitAuthenticationError, ProviderError
-from pulse.application.orbit_models import CreatedTimesheetEntry
+from pulse.application.orbit_models import (
+    CreatedTimesheetEntry,
+    OrbitTimesheetEntry,
+    ResolvedTimesheetQuery,
+    TimesheetEntryPage,
+)
 from pulse.presentation.teams import (
     OrbitCancelCardHandler,
     OrbitConfirmCardHandler,
     OrbitLoginCardHandler,
+    OrbitViewDetailCardHandler,
+    OrbitViewPageCardHandler,
     TeamsMessageHandler,
     clean_teams_text,
+    orbit_timesheet_list_card,
 )
 
 
@@ -86,8 +94,44 @@ class FakeOrbitAddService:
         return True
 
 
+class FakeOrbitViewService:
+    def __init__(self) -> None:
+        self.list_text_received = None
+        self.list_page_received = None
+        self.detail_received = None
+        self.entry = OrbitTimesheetEntry(
+            id="3c160089-5f25-4bab-a722-5179c0e5d3ae",
+            entry_date=date(2026, 9, 25),
+            duration_minutes=90,
+            description="Fixed validation",
+            status="draft",
+            project_name="ADGM Form Submissions",
+            task_name="Backend Development",
+        )
+        self.query = ResolvedTimesheetQuery(
+            start_date=date(2026, 9, 21),
+            end_date=date(2026, 9, 27),
+            page=0,
+            page_size=5,
+        )
+
+    async def list_from_text(self, teams_user_id: str, text: str) -> TimesheetEntryPage:
+        self.list_text_received = (teams_user_id, text)
+        return TimesheetEntryPage(self.query, (self.entry,), 1)
+
+    async def list_page(
+        self, teams_user_id: str, query: ResolvedTimesheetQuery
+    ) -> TimesheetEntryPage:
+        self.list_page_received = (teams_user_id, query)
+        return TimesheetEntryPage(query, (self.entry,), 6)
+
+    async def get_detail(self, teams_user_id: str, entry_id: str) -> OrbitTimesheetEntry:
+        self.detail_received = (teams_user_id, entry_id)
+        return self.entry
+
+
 class FakeCardContext:
-    def __init__(self, data: dict[str, str], activity_id: str = "login-submit-1") -> None:
+    def __init__(self, data: dict[str, object], activity_id: str = "login-submit-1") -> None:
         self.activity = SimpleNamespace(
             id=activity_id,
             from_=SimpleNamespace(id="teams-user-1", aad_object_id="entra-user-1"),
@@ -201,6 +245,115 @@ async def test_natural_language_time_entry_routes_to_orbit_without_prefix() -> N
         "action": "orbit_cancel",
         "pending_id": "pending-entry-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_natural_language_view_request_returns_timesheet_card() -> None:
+    chat = FakeChatService()
+    view = FakeOrbitViewService()
+    context = FakeContext("show my draft entries for this week")
+
+    await TeamsMessageHandler(
+        chat,
+        FakeOrbitAuthService(),  # type: ignore[arg-type]
+        FakeOrbitAddService(),  # type: ignore[arg-type]
+        view,  # type: ignore[arg-type]
+    )(context)
+
+    assert chat.received is None
+    assert view.list_text_received == ("teams-user-1", context.activity.text)
+    payload = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert "Orbit timesheet" in str(payload)
+    assert "View details" in str(payload)
+    assert "3c160089-5f25-4bab-a722-5179c0e5d3ae" in str(payload)
+
+
+def test_timesheet_list_card_has_detail_and_next_actions() -> None:
+    view = FakeOrbitViewService()
+    second_entry = OrbitTimesheetEntry(
+        id="4d270190-6f36-4cac-b833-6280d1f6e4bf",
+        entry_date=date(2026, 9, 24),
+        duration_minutes=30,
+        description="Reviewed API",
+        status="submitted",
+        project_name="Internal Platform",
+        task_name="Code Review",
+    )
+    page = TimesheetEntryPage(view.query, (view.entry, second_entry), 6)
+
+    payload = orbit_timesheet_list_card(page).model_dump(
+        by_alias=True, exclude_none=True
+    )
+
+    assert "Displayed total: 2h 00m" in str(payload)
+    assert sum("View details" in str(item) for item in payload["body"]) == 2
+    assert payload["actions"][0]["title"] == "Next"
+    assert payload["actions"][0]["data"]["page"] == 1
+
+
+def test_timesheet_list_card_handles_empty_results() -> None:
+    view = FakeOrbitViewService()
+
+    payload = orbit_timesheet_list_card(
+        TimesheetEntryPage(view.query, (), 0)
+    ).model_dump(by_alias=True, exclude_none=True)
+
+    assert "No timesheet entries were found" in str(payload)
+    assert "View details" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_timesheet_page_button_loads_page_without_typed_message() -> None:
+    view = FakeOrbitViewService()
+    context = FakeCardContext(
+        {
+            "action": "orbit_view_page",
+            "start_date": "2026-09-21",
+            "end_date": "2026-09-27",
+            "page": 1,
+        },
+        activity_id="page-action-1",
+    )
+
+    handler = OrbitViewPageCardHandler(view)  # type: ignore[arg-type]
+    response = await handler(context)
+    duplicate = await handler(context)
+    await asyncio.sleep(0)
+
+    assert isinstance(response, AdaptiveCardActionCardResponse)
+    assert isinstance(duplicate, AdaptiveCardActionCardResponse)
+    assert "Loading timesheet" in str(response.value)
+    assert view.list_page_received is not None
+    assert view.list_page_received[0] == "entra-user-1"
+    assert view.list_page_received[1].page == 1
+    assert len(context.sent) == 1
+    assert "Orbit timesheet" in str(context.sent[0])
+
+
+@pytest.mark.asyncio
+async def test_timesheet_detail_button_loads_employee_scoped_detail() -> None:
+    view = FakeOrbitViewService()
+    context = FakeCardContext(
+        {
+            "action": "orbit_view_detail",
+            "entry_id": view.entry.id,
+            "start_date": "2026-09-21",
+            "end_date": "2026-09-27",
+            "page": 0,
+        },
+        activity_id="detail-action-1",
+    )
+
+    response = await OrbitViewDetailCardHandler(view)(context)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+
+    assert isinstance(response, AdaptiveCardActionCardResponse)
+    assert "Loading Orbit entry" in str(response.value)
+    assert view.detail_received == ("entra-user-1", view.entry.id)
+    assert len(context.sent) == 1
+    detail = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert "Orbit entry details" in str(detail)
+    assert "Back to list" in str(detail)
 
 
 @pytest.mark.asyncio

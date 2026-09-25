@@ -137,6 +137,23 @@ orbit logout
 Orbit sessions survive PULSE restarts until their fixed expiry. Pending entry
 drafts remain process-local in this phase and must be recreated after a restart.
 
+## Orbit view/list flow
+
+PULSE can list the authenticated employee's Orbit entries using natural language:
+
+```text
+show my timesheet for today
+show my draft entries for this week
+show ADGM Forms entries from 2026-09-20 to 2026-09-25
+```
+
+If no date is supplied, the current Monday-to-Sunday business week is used.
+Results appear in a paginated Adaptive Card with canonical project/task names,
+status, notes, duration, and a displayed-page total. Select **View details** to
+load the complete entry, or **Previous** / **Next** to navigate; these buttons
+execute directly and do not require a follow-up chat message. This phase is
+read-only and does not expose edit/delete actions.
+
 ## Tests and lint
 
 ```powershell

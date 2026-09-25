@@ -6,11 +6,16 @@ import httpx
 from groq import AsyncGroq
 
 from pulse.application.services.chat import ChatService
-from pulse.application.services.orbit import OrbitAddEntryService, OrbitAuthService
+from pulse.application.services.orbit import (
+    OrbitAddEntryService,
+    OrbitAuthService,
+    OrbitViewEntriesService,
+)
 from pulse.core.config import Settings
 from pulse.infrastructure.database import Database
 from pulse.infrastructure.llm.groq_client import GroqLLMClient
 from pulse.infrastructure.llm.timesheet_parser import LLMTimesheetDraftParser
+from pulse.infrastructure.llm.timesheet_query_parser import LLMTimesheetQueryParser
 from pulse.infrastructure.orbit.encryption import OrbitTokenCipher
 from pulse.infrastructure.orbit.memory import InMemoryPendingEntryStore
 from pulse.infrastructure.orbit.postgres import PostgresOrbitSessionStore
@@ -25,6 +30,7 @@ class Container:
     chat_service: ChatService
     orbit_auth_service: OrbitAuthService | None = None
     orbit_add_service: OrbitAddEntryService | None = None
+    orbit_view_service: OrbitViewEntriesService | None = None
     orbit_http_client: httpx.AsyncClient | None = None
     database: Database | None = None
 
@@ -81,11 +87,20 @@ class Container:
             max_duration_minutes=settings.orbit_max_duration_minutes,
             max_notes_chars=settings.orbit_max_notes_chars,
         )
+        view_service = OrbitViewEntriesService(
+            auth_service,
+            orbit_client,
+            LLMTimesheetQueryParser(llm_client),
+            business_timezone=settings.orbit_business_timezone,
+            page_size=settings.orbit_view_page_size,
+            max_range_days=settings.orbit_view_max_range_days,
+        )
         return cls(
             settings=settings,
             chat_service=chat_service,
             orbit_auth_service=auth_service,
             orbit_add_service=add_service,
+            orbit_view_service=view_service,
             orbit_http_client=orbit_http,
             database=database,
         )

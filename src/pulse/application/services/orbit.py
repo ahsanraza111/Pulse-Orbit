@@ -5,7 +5,7 @@ import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pulse.application.errors import (
@@ -21,7 +21,11 @@ from pulse.application.orbit_models import (
     OrbitProject,
     OrbitSession,
     OrbitTask,
+    OrbitTimesheetEntry,
+    ParsedTimesheetQuery,
     PendingTimesheetEntry,
+    ResolvedTimesheetQuery,
+    TimesheetEntryPage,
 )
 from pulse.application.ports.orbit import (
     OrbitAuthPort,
@@ -29,6 +33,7 @@ from pulse.application.ports.orbit import (
     OrbitTimesheetPort,
     PendingEntryStore,
     TimesheetDraftParser,
+    TimesheetQueryParser,
 )
 
 
@@ -309,3 +314,167 @@ class OrbitAddEntryService:
             raise OrbitAuthenticationError(
                 "The Orbit identity changed. Please create the entry again."
             )
+
+
+class OrbitViewEntriesService:
+    ALLOWED_STATUSES = {"draft", "submitted", "approved", "rejected"}
+
+    def __init__(
+        self,
+        auth_service: OrbitAuthService,
+        timesheet_port: OrbitTimesheetPort,
+        query_parser: TimesheetQueryParser,
+        *,
+        business_timezone: str,
+        page_size: int,
+        max_range_days: int,
+        now: Callable[[], datetime] = utc_now,
+    ) -> None:
+        self._auth = auth_service
+        self._timesheets = timesheet_port
+        self._parser = query_parser
+        self._page_size = page_size
+        self._max_range_days = max_range_days
+        self._now = now
+        try:
+            self._timezone = ZoneInfo(business_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown Orbit business timezone: {business_timezone}") from exc
+
+    async def list_from_text(
+        self,
+        teams_user_id: str,
+        request_text: str,
+    ) -> TimesheetEntryPage:
+        session, employee = await self._identity(teams_user_id)
+        today = self._now().astimezone(self._timezone).date()
+        parsed = await self._parser.parse(request_text, today=today)
+        query = await self._resolve_query(session, employee, parsed)
+        return await self._fetch_page(session, employee, query)
+
+    async def list_page(
+        self,
+        teams_user_id: str,
+        query: ResolvedTimesheetQuery,
+    ) -> TimesheetEntryPage:
+        session, employee = await self._identity(teams_user_id)
+        validated = await self._validate_resolved_query(session, employee, query)
+        return await self._fetch_page(session, employee, validated)
+
+    async def get_detail(
+        self,
+        teams_user_id: str,
+        entry_id: str,
+    ) -> OrbitTimesheetEntry:
+        try:
+            UUID(entry_id)
+        except (ValueError, AttributeError) as exc:
+            raise OrbitValidationError("This Orbit entry reference is invalid.") from exc
+        session, employee = await self._identity(teams_user_id)
+        entry = await self._timesheets.get_entry(
+            session.access_token,
+            employee_id=employee.id,
+            entry_id=entry_id,
+        )
+        if entry is None:
+            raise OrbitNotFoundError("This Orbit entry was not found.")
+        return entry
+
+    async def _identity(self, teams_user_id: str) -> tuple[OrbitSession, OrbitEmployee]:
+        session, auth_user_id = await self._auth.get_authenticated_session(teams_user_id)
+        employee = await self._timesheets.get_employee(session.access_token, auth_user_id)
+        return session, employee
+
+    async def _resolve_query(
+        self,
+        session: OrbitSession,
+        employee: OrbitEmployee,
+        parsed: ParsedTimesheetQuery,
+    ) -> ResolvedTimesheetQuery:
+        project_id: str | None = None
+        project_name: str | None = None
+        if parsed.project_name:
+            projects = await self._timesheets.list_assigned_projects(
+                session.access_token, employee.id
+            )
+            project = OrbitAddEntryService._match_entity(
+                "project", parsed.project_name, projects
+            )
+            project_id = project.id
+            project_name = project.name
+        query = ResolvedTimesheetQuery(
+            start_date=parsed.start_date,
+            end_date=parsed.end_date,
+            project_id=project_id,
+            project_name=project_name,
+            status=parsed.status,
+            page=0,
+            page_size=self._page_size,
+        )
+        self._validate_query_values(query)
+        return query
+
+    async def _validate_resolved_query(
+        self,
+        session: OrbitSession,
+        employee: OrbitEmployee,
+        query: ResolvedTimesheetQuery,
+    ) -> ResolvedTimesheetQuery:
+        project_name: str | None = None
+        if query.project_id:
+            projects = await self._timesheets.list_assigned_projects(
+                session.access_token, employee.id
+            )
+            project = next((item for item in projects if item.id == query.project_id), None)
+            if project is None:
+                raise OrbitNotFoundError("The selected Orbit project is not assigned to you.")
+            project_name = project.name
+        validated = ResolvedTimesheetQuery(
+            start_date=query.start_date,
+            end_date=query.end_date,
+            project_id=query.project_id,
+            project_name=project_name,
+            status=query.status.casefold() if query.status else None,
+            page=query.page,
+            page_size=self._page_size,
+        )
+        self._validate_query_values(validated)
+        return validated
+
+    def _validate_query_values(self, query: ResolvedTimesheetQuery) -> None:
+        if query.start_date > query.end_date:
+            raise OrbitValidationError("The timesheet start date must not follow the end date.")
+        range_days = (query.end_date - query.start_date).days + 1
+        if range_days > self._max_range_days:
+            raise OrbitValidationError(
+                f"Timesheet date ranges cannot exceed {self._max_range_days} days."
+            )
+        if query.status and query.status not in self.ALLOWED_STATUSES:
+            allowed = ", ".join(sorted(self.ALLOWED_STATUSES))
+            raise OrbitValidationError(f"Orbit status must be one of: {allowed}.")
+        if query.page < 0:
+            raise OrbitValidationError("The requested timesheet page is invalid.")
+
+    async def _fetch_page(
+        self,
+        session: OrbitSession,
+        employee: OrbitEmployee,
+        query: ResolvedTimesheetQuery,
+    ) -> TimesheetEntryPage:
+        batch = await self._timesheets.list_entries(
+            session.access_token,
+            employee_id=employee.id,
+            start_date=query.start_date,
+            end_date=query.end_date,
+            project_id=query.project_id,
+            status=query.status,
+            limit=query.page_size,
+            offset=query.page * query.page_size,
+        )
+        if query.page > 0 and not batch.entries and batch.total_count > 0:
+            raise OrbitValidationError("That timesheet page is no longer available.")
+        return TimesheetEntryPage(
+            query=query,
+            entries=batch.entries,
+            total_count=batch.total_count,
+        )

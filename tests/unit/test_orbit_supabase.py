@@ -81,6 +81,65 @@ async def test_create_timeout_is_reported_as_uncertain() -> None:
             await client.create_entry("user-token", pending_entry())
 
 
+@pytest.mark.asyncio
+async def test_list_entries_uses_employee_date_and_optional_filters() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/rest/v1/timesheet_entries"
+        assert request.headers["authorization"] == "Bearer user-token"
+        assert request.headers["prefer"] == "count=exact"
+        assert request.url.params["employee_id"] == "eq.employee-1"
+        assert request.url.params["and"] == (
+            "(entry_date.gte.2026-09-21,entry_date.lte.2026-09-27)"
+        )
+        assert request.url.params["project_id"] == "eq.project-1"
+        assert request.url.params["status"] == "eq.draft"
+        assert request.url.params["limit"] == "5"
+        assert request.url.params["offset"] == "5"
+        return httpx.Response(
+            200,
+            headers={"Content-Range": "5-5/6"},
+            json=[timesheet_row()],
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        batch = await client.list_entries(
+            "user-token",
+            employee_id="employee-1",
+            start_date=date(2026, 9, 21),
+            end_date=date(2026, 9, 27),
+            project_id="project-1",
+            status="draft",
+            limit=5,
+            offset=5,
+        )
+
+    assert batch.total_count == 6
+    assert len(batch.entries) == 1
+    assert batch.entries[0].project_name == "ADGM Form Submissions"
+    assert batch.entries[0].task_name == "Backend Development"
+
+
+@pytest.mark.asyncio
+async def test_get_entry_is_scoped_to_employee() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["id"] == "eq.3c160089-5f25-4bab-a722-5179c0e5d3ae"
+        assert request.url.params["employee_id"] == "eq.employee-1"
+        return httpx.Response(200, json=[timesheet_row()])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        entry = await client.get_entry(
+            "user-token",
+            employee_id="employee-1",
+            entry_id="3c160089-5f25-4bab-a722-5179c0e5d3ae",
+        )
+
+    assert entry is not None
+    assert entry.description == "Fixed validation"
+    assert entry.status == "draft"
+
+
 def pending_entry() -> PendingTimesheetEntry:
     return PendingTimesheetEntry(
         id="draft-1",
@@ -96,4 +155,16 @@ def pending_entry() -> PendingTimesheetEntry:
         description="Implemented retries",
         expires_at=datetime(2026, 9, 22, 13, tzinfo=UTC),
     )
+
+
+def timesheet_row() -> dict[str, object]:
+    return {
+        "id": "3c160089-5f25-4bab-a722-5179c0e5d3ae",
+        "entry_date": "2026-09-25",
+        "duration_minutes": 90,
+        "description": "Fixed validation",
+        "status": "draft",
+        "project": {"name": "ADGM Form Submissions"},
+        "task": {"name": "Backend Development"},
+    }
 
