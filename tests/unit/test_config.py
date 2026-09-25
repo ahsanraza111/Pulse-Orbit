@@ -43,3 +43,21 @@ def test_skip_auth_is_rejected_outside_development() -> None:
 
     with pytest.raises(ValueError, match="only be skipped in development"):
         settings.validate_runtime()
+
+
+def test_orbit_requires_complete_optional_configuration() -> None:
+    partial = Settings(
+        _env_file=None,
+        orbit_supabase_url="https://orbit.example",
+        orbit_supabase_anon_key=None,
+        orbit_session_encryption_key=None,
+    )
+    complete = Settings(
+        _env_file=None,
+        orbit_supabase_url="https://orbit.example",
+        orbit_supabase_anon_key="public-key",
+        orbit_session_encryption_key="fernet-key-placeholder",
+    )
+
+    assert partial.orbit_is_configured is False
+    assert complete.orbit_is_configured is True

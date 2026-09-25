@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from groq import BadRequestError
 
 from pulse.application.errors import ProviderError
 from pulse.application.models import ChatMessage
@@ -44,6 +46,7 @@ async def test_groq_adapter_maps_messages_and_options() -> None:
         "messages": [{"role": "user", "content": "question"}],
         "temperature": 0.2,
         "max_completion_tokens": 100,
+        "tool_choice": "none",
     }
 
 
@@ -72,3 +75,39 @@ async def test_groq_adapter_rejects_empty_response() -> None:
     with pytest.raises(ProviderError, match="empty response"):
         await adapter.complete([ChatMessage(role="user", content="question")])
 
+
+@pytest.mark.asyncio
+async def test_groq_adapter_retries_unexpected_tool_call_once() -> None:
+    class RetryCompletions:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                response = httpx.Response(
+                    400,
+                    request=httpx.Request("POST", "https://api.groq.test/chat"),
+                )
+                raise BadRequestError(
+                    "Tool choice is none, but model called a tool",
+                    response=response,
+                    body={"error": {"code": "tool_use_failed"}},
+                )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="safe answer"))]
+            )
+
+    completions = RetryCompletions()
+    adapter = GroqLLMClient(
+        fake_client(completions),  # type: ignore[arg-type]
+        model="model",
+        temperature=0,
+        max_completion_tokens=100,
+    )
+
+    result = await adapter.complete([ChatMessage(role="user", content="question")])
+
+    assert result == "safe answer"
+    assert len(completions.calls) == 2
+    assert "No tools are available" in completions.calls[1]["messages"][0]["content"]

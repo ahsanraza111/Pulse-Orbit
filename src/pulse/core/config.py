@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     groq_max_completion_tokens: int = Field(default=1024, ge=1, le=8192)
     groq_timeout_seconds: float = Field(default=30, gt=0, le=120)
 
+    orbit_supabase_url: str | None = None
+    orbit_supabase_anon_key: SecretStr | None = None
+    orbit_session_encryption_key: SecretStr | None = None
+    orbit_http_timeout_seconds: float = Field(default=15, gt=0, le=120)
+    orbit_confirmation_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    orbit_business_timezone: str = "Asia/Karachi"
+    orbit_max_duration_minutes: int = Field(default=1440, ge=1, le=10080)
+    orbit_max_notes_chars: int = Field(default=2000, ge=1, le=10000)
+
     max_user_message_chars: int = Field(default=8000, ge=1, le=50000)
     system_prompt: str = (
         "You are PULSE, a concise and helpful internal assistant. Never claim that a "
@@ -49,6 +58,14 @@ class Settings(BaseSettings):
     @property
     def groq_is_configured(self) -> bool:
         return self.groq_api_key is not None
+
+    @property
+    def orbit_is_configured(self) -> bool:
+        return bool(
+            self.orbit_supabase_url
+            and self.orbit_supabase_anon_key
+            and self.orbit_session_encryption_key
+        )
 
     def validate_runtime(self) -> None:
         errors: list[str] = []
@@ -67,4 +84,3 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-

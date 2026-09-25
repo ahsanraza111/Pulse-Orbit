@@ -19,7 +19,7 @@ async def test_readiness_does_not_expose_secrets(http_client: AsyncClient) -> No
         "status": "ready",
         "teams_configured": True,
         "groq_configured": True,
+        "orbit_configured": False,
     }
     assert "test-client-secret" not in response.text
     assert "test-groq-key" not in response.text
-

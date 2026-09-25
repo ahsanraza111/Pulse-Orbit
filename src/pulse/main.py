@@ -17,7 +17,13 @@ async def serve() -> None:
     container = Container.build(settings)
 
     fastapi_app = create_http_app(settings)
-    teams_app = register_teams_app(fastapi_app, settings, container.chat_service)
+    teams_app = register_teams_app(
+        fastapi_app,
+        settings,
+        container.chat_service,
+        container.orbit_auth_service,
+        container.orbit_add_service,
+    )
     await teams_app.initialize()
 
     server = uvicorn.Server(
@@ -28,7 +34,10 @@ async def serve() -> None:
             log_level=settings.log_level.lower(),
         )
     )
-    await server.serve()
+    try:
+        await server.serve()
+    finally:
+        await container.close()
 
 
 def run() -> None:
@@ -37,4 +46,3 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
-

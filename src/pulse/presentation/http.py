@@ -22,7 +22,6 @@ def create_http_app(settings: Settings) -> FastAPI:
             "status": "ready" if ready else "not_ready",
             "teams_configured": settings.teams_is_configured,
             "groq_configured": settings.groq_is_configured,
+            "orbit_configured": settings.orbit_is_configured,
         }
-
     return app
-

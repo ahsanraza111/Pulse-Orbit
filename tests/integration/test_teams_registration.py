@@ -26,7 +26,13 @@ async def test_teams_sdk_registers_messages_endpoint() -> None:
     )
     http_app = create_http_app(settings)
     chat_service = ChatService(NoOpLLMClient(), "system", 100)
-    teams_app = register_teams_app(http_app, settings, chat_service)
+    teams_app = register_teams_app(
+        http_app,
+        settings,
+        chat_service,
+        orbit_auth_service=object(),  # type: ignore[arg-type]
+        orbit_add_service=object(),  # type: ignore[arg-type]
+    )
 
     await teams_app.initialize()
 

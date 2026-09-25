@@ -9,16 +9,18 @@ description = "PULSE: a Microsoft Teams assistant with Groq and future Orbit tim
 readme = "README.md"
 requires-python = ">=3.12,<4.0"
 dependencies = [
+  "cryptography>=50,<51",
   "fastapi>=0.116,<1.0",
   "groq>=1.7,<2.0",
-  "microsoft-teams-apps==2.0.16",
+  "httpx>=0.28,<1.0",
+  "microsoft-teams-apps==2.1.0",
   "pydantic-settings>=2.15,<3.0",
+  "tzdata>=2025.2",
   "uvicorn[standard]>=0.35,<1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1.0",
   "pytest>=8.4,<9.0",
   "pytest-asyncio>=1.1,<2.0",
   "ruff>=0.12,<1.0",
@@ -41,4 +43,3 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
-

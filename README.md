@@ -1,20 +1,24 @@
 # PULSE
 
 PULSE is an internal Microsoft Teams assistant. Phase 1 proves the complete
-Teams message -> FastAPI -> Groq -> Teams reply path. Later phases add safe
-Orbit timesheet workflows without coupling Orbit logic to Teams or Groq.
+Teams message -> FastAPI -> Groq -> Teams reply path. Phase 2 adds a confirmed,
+user-scoped Orbit timesheet entry workflow without coupling Orbit logic to Teams
+or Groq.
 
 ## Current scope
 
 - FastAPI service with liveness and readiness endpoints.
 - Authenticated Microsoft Teams bot endpoint at `/api/messages`.
 - Async Groq chat completion integration.
+- In-chat Orbit sign-in card, token refresh, project/task resolution, entry
+  confirmation, and draft creation.
 - Explicit dependency injection through a composition root.
 - Unit and HTTP tests that do not require real credentials.
 - Product and phase documentation under `docs/`.
 
-Orbit login and timesheet operations are intentionally not implemented in
-Phase 1. Their requirements and safety rules are captured in [the PRD](docs/PRD.md).
+Orbit list/edit/delete and approval workflows are intentionally deferred. Product
+requirements and safety rules are captured in [the PRD](docs/PRD.md) and the
+[Phase 2 add-entry specification](docs/phases/PHASE_02_ORBIT_ADD_ENTRY_REQUIREMENTS.md).
 
 ## Requirements
 
@@ -33,6 +37,16 @@ Copy-Item .env.example .env
 ```
 
 Edit `.env` and supply your credentials. Do not commit `.env`.
+
+For Orbit add-entry support, also set the current Orbit Supabase URL,
+publishable/legacy anon key, and a Fernet encryption key. Generate the encryption
+key locally:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Copy that output into `PULSE_ORBIT_SESSION_ENCRYPTION_KEY`.
 
 Start PULSE:
 
@@ -62,6 +76,56 @@ Invoke-RestMethod http://localhost:3978/health/ready
 `PULSE_TEAMS_SKIP_AUTH=true` is only for a local Microsoft 365 Agents
 Playground connection. Keep it `false` whenever the endpoint is exposed by
 ngrok.
+
+## Orbit add-entry flow
+
+In Teams, link the current user's Orbit account:
+
+```text
+orbit login
+```
+
+PULSE displays a password-masked Adaptive Card directly in Teams. Enter the Orbit
+email and password in that card and select **Connect Orbit**. No browser link or
+redirect is used. The password is used only for that authentication attempt and
+is not stored. Never send a password as an ordinary Teams chat message. After a
+successful login, PULSE sends a separate success message with up to three
+time-entry templates. Selecting a template inserts an editable `orbit add`
+command into the Teams compose box; it is not submitted automatically.
+
+Prepare an entry using natural language after the command prefix:
+
+```text
+orbit add 2 hours today on Alpha project, API Development task. Fixed retries.
+```
+
+The prefix is optional for clear time-entry requests. For example:
+
+```text
+add an entry for today on ADGM forms, backend dev task, 4 hours, notes API fix
+```
+
+PULSE compares the requested names with the user's live assigned Orbit projects
+and active tasks. It accepts clear abbreviations, plural variants, and close
+spellings, then shows the canonical names in an interactive confirmation card.
+Ambiguous matches are never guessed. Select **Confirm entry** or **Cancel** on
+the card; no follow-up message is required. The text commands remain available
+as a fallback:
+
+```text
+orbit confirm
+orbit cancel
+```
+
+Remove the process-local Orbit session with:
+
+```text
+orbit logout
+```
+
+The current MVP encrypts tokens in process memory. Restarting PULSE signs Orbit
+users out. Production deployment requires a durable encrypted session and pending
+draft store.
 
 ## Tests and lint
 

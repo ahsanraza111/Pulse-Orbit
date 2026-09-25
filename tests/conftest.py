@@ -16,6 +16,9 @@ def configured_settings() -> Settings:
         teams_client_secret="test-client-secret",
         teams_tenant_id="test-tenant-id",
         groq_api_key="test-groq-key",
+        orbit_supabase_url=None,
+        orbit_supabase_anon_key=None,
+        orbit_session_encryption_key=None,
     )
 
 
