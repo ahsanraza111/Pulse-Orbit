@@ -52,7 +52,7 @@ class OrbitAuthService:
         if not email.strip() or not password:
             raise OrbitValidationError("Email and password are required.")
         session = await self._auth.sign_in(email.strip(), password)
-        await self._sessions.save(teams_user_id, session)
+        await self._sessions.save(teams_user_id, session, reset_ttl=True)
 
     async def get_valid_session(self, teams_user_id: str) -> OrbitSession:
         session = await self._sessions.get(teams_user_id)
@@ -83,7 +83,7 @@ class OrbitAuthService:
             raise OrbitAuthRequiredError(
                 "Your Orbit session expired. Please sign in again."
             ) from None
-        await self._sessions.save(teams_user_id, refreshed)
+        await self._sessions.save(teams_user_id, refreshed, reset_ttl=False)
         return refreshed
 
 

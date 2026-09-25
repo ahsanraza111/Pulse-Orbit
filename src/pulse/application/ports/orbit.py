@@ -46,7 +46,13 @@ class TimesheetDraftParser(Protocol):
 class OrbitSessionStore(Protocol):
     async def get(self, teams_user_id: str) -> OrbitSession | None: ...
 
-    async def save(self, teams_user_id: str, session: OrbitSession) -> None: ...
+    async def save(
+        self,
+        teams_user_id: str,
+        session: OrbitSession,
+        *,
+        reset_ttl: bool = False,
+    ) -> None: ...
 
     async def delete(self, teams_user_id: str) -> None: ...
 

@@ -17,6 +17,11 @@ async def test_container_wires_optional_orbit_services() -> None:
         orbit_supabase_url="https://orbit.example",
         orbit_supabase_anon_key="publishable-key",
         orbit_session_encryption_key=Fernet.generate_key().decode(),
+        database_host="127.0.0.1",
+        database_port=5435,
+        database_name="pulse",
+        database_user="postgres",
+        database_password="database-secret",
     )
 
     container = Container.build(settings)
@@ -24,5 +29,6 @@ async def test_container_wires_optional_orbit_services() -> None:
         assert container.orbit_auth_service is not None
         assert container.orbit_add_service is not None
         assert container.orbit_http_client is not None
+        assert container.database is not None
     finally:
         await container.close()

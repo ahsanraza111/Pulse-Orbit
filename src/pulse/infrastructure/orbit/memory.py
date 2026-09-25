@@ -38,7 +38,14 @@ class EncryptedInMemoryOrbitSessionStore:
             await self.delete(teams_user_id)
             return None
 
-    async def save(self, teams_user_id: str, session: OrbitSession) -> None:
+    async def save(
+        self,
+        teams_user_id: str,
+        session: OrbitSession,
+        *,
+        reset_ttl: bool = False,
+    ) -> None:
+        _ = reset_ttl
         payload = json.dumps(
             {
                 "access_token": session.access_token,

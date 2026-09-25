@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     orbit_business_timezone: str = "Asia/Karachi"
     orbit_max_duration_minutes: int = Field(default=1440, ge=1, le=10080)
     orbit_max_notes_chars: int = Field(default=2000, ge=1, le=10000)
+    orbit_session_ttl_minutes: int = Field(default=60, ge=5, le=1440)
+
+    database_host: str | None = None
+    database_port: int = Field(default=5432, ge=1, le=65535)
+    database_name: str | None = None
+    database_user: str | None = None
+    database_password: SecretStr | None = None
 
     max_user_message_chars: int = Field(default=8000, ge=1, le=50000)
     system_prompt: str = (
@@ -61,10 +68,23 @@ class Settings(BaseSettings):
 
     @property
     def orbit_is_configured(self) -> bool:
+        return self.orbit_provider_is_configured and self.database_is_configured
+
+    @property
+    def orbit_provider_is_configured(self) -> bool:
         return bool(
             self.orbit_supabase_url
             and self.orbit_supabase_anon_key
             and self.orbit_session_encryption_key
+        )
+
+    @property
+    def database_is_configured(self) -> bool:
+        return bool(
+            self.database_host
+            and self.database_name
+            and self.database_user
+            and self.database_password
         )
 
     def validate_runtime(self) -> None:
@@ -77,6 +97,31 @@ class Settings(BaseSettings):
             errors.append("Teams authentication can only be skipped in development")
         if not self.groq_is_configured:
             errors.append("Groq API key is required")
+        orbit_values = (
+            self.orbit_supabase_url,
+            self.orbit_supabase_anon_key,
+            self.orbit_session_encryption_key,
+        )
+        if (
+            any(value is not None for value in orbit_values)
+            and not self.orbit_provider_is_configured
+        ):
+            errors.append(
+                "Orbit URL, anon key, and session encryption key must be configured together"
+            )
+        database_values = (
+            self.database_host,
+            self.database_name,
+            self.database_user,
+            self.database_password,
+        )
+        if (
+            any(value is not None for value in database_values)
+            and not self.database_is_configured
+        ):
+            errors.append("Database host, name, user, and password must be configured together")
+        if self.orbit_provider_is_configured and not self.database_is_configured:
+            errors.append("PostgreSQL configuration is required when Orbit is enabled")
         if errors:
             raise ValueError("Invalid PULSE configuration: " + "; ".join(errors))
 

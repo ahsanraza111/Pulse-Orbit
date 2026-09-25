@@ -26,12 +26,20 @@ NOW = datetime(2026, 9, 22, 12, tzinfo=UTC)
 class MemorySessionStore:
     def __init__(self, session: OrbitSession | None = None) -> None:
         self.session = session
+        self.reset_ttl_values: list[bool] = []
 
     async def get(self, teams_user_id: str) -> OrbitSession | None:
         return self.session
 
-    async def save(self, teams_user_id: str, session: OrbitSession) -> None:
+    async def save(
+        self,
+        teams_user_id: str,
+        session: OrbitSession,
+        *,
+        reset_ttl: bool = False,
+    ) -> None:
         self.session = session
+        self.reset_ttl_values.append(reset_ttl)
 
     async def delete(self, teams_user_id: str) -> None:
         self.session = None
@@ -131,6 +139,7 @@ async def test_login_authenticates_and_stores_session_without_storing_password()
 
     assert client.sign_in_password == "secret-password"
     assert store.session == session()
+    assert store.reset_ttl_values == [True]
     assert not hasattr(store.session, "password")
 
 

@@ -8,12 +8,12 @@ from groq import AsyncGroq
 from pulse.application.services.chat import ChatService
 from pulse.application.services.orbit import OrbitAddEntryService, OrbitAuthService
 from pulse.core.config import Settings
+from pulse.infrastructure.database import Database
 from pulse.infrastructure.llm.groq_client import GroqLLMClient
 from pulse.infrastructure.llm.timesheet_parser import LLMTimesheetDraftParser
-from pulse.infrastructure.orbit.memory import (
-    EncryptedInMemoryOrbitSessionStore,
-    InMemoryPendingEntryStore,
-)
+from pulse.infrastructure.orbit.encryption import OrbitTokenCipher
+from pulse.infrastructure.orbit.memory import InMemoryPendingEntryStore
+from pulse.infrastructure.orbit.postgres import PostgresOrbitSessionStore
 from pulse.infrastructure.orbit.supabase import SupabaseOrbitClient
 
 
@@ -26,6 +26,7 @@ class Container:
     orbit_auth_service: OrbitAuthService | None = None
     orbit_add_service: OrbitAddEntryService | None = None
     orbit_http_client: httpx.AsyncClient | None = None
+    database: Database | None = None
 
     @classmethod
     def build(cls, settings: Settings) -> Container:
@@ -54,14 +55,17 @@ class Container:
         assert settings.orbit_supabase_anon_key is not None
         assert settings.orbit_session_encryption_key is not None
 
+        database = Database.build(settings)
         orbit_http = httpx.AsyncClient(timeout=settings.orbit_http_timeout_seconds)
         orbit_client = SupabaseOrbitClient(
             orbit_http,
             base_url=settings.orbit_supabase_url,
             api_key=settings.orbit_supabase_anon_key.get_secret_value(),
         )
-        session_store = EncryptedInMemoryOrbitSessionStore(
-            settings.orbit_session_encryption_key.get_secret_value()
+        session_store = PostgresOrbitSessionStore(
+            database.sessions,
+            OrbitTokenCipher(settings.orbit_session_encryption_key.get_secret_value()),
+            ttl_minutes=settings.orbit_session_ttl_minutes,
         )
         auth_service = OrbitAuthService(
             orbit_client,
@@ -83,8 +87,11 @@ class Container:
             orbit_auth_service=auth_service,
             orbit_add_service=add_service,
             orbit_http_client=orbit_http,
+            database=database,
         )
 
     async def close(self) -> None:
         if self.orbit_http_client:
             await self.orbit_http_client.aclose()
+        if self.database:
+            await self.database.close()

@@ -19,6 +19,10 @@ def configured_settings() -> Settings:
         orbit_supabase_url=None,
         orbit_supabase_anon_key=None,
         orbit_session_encryption_key=None,
+        database_host=None,
+        database_name=None,
+        database_user=None,
+        database_password=None,
     )
 
 

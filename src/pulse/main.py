@@ -16,7 +16,10 @@ async def serve() -> None:
     configure_logging(settings.log_level)
     container = Container.build(settings)
 
-    fastapi_app = create_http_app(settings)
+    fastapi_app = create_http_app(
+        settings,
+        container.database.is_ready if container.database else None,
+    )
     teams_app = register_teams_app(
         fastapi_app,
         settings,

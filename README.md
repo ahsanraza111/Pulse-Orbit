@@ -39,14 +39,25 @@ Copy-Item .env.example .env
 Edit `.env` and supply your credentials. Do not commit `.env`.
 
 For Orbit add-entry support, also set the current Orbit Supabase URL,
-publishable/legacy anon key, and a Fernet encryption key. Generate the encryption
-key locally:
+publishable/legacy anon key, PostgreSQL connection values, and a Fernet
+encryption key. Generate the encryption key locally:
 
 ```powershell
 .\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 Copy that output into `PULSE_ORBIT_SESSION_ENCRYPTION_KEY`.
+
+Create the database schema through Alembic (do not create application tables
+manually in pgAdmin):
+
+```powershell
+.\.venv\Scripts\alembic.exe upgrade head
+```
+
+PULSE persists encrypted Orbit access and refresh tokens in PostgreSQL for a
+fixed 60-minute application session. Provider token refresh does not extend this
+window. The database password and encryption key must remain only in `.env`.
 
 Start PULSE:
 
@@ -123,9 +134,8 @@ Remove the process-local Orbit session with:
 orbit logout
 ```
 
-The current MVP encrypts tokens in process memory. Restarting PULSE signs Orbit
-users out. Production deployment requires a durable encrypted session and pending
-draft store.
+Orbit sessions survive PULSE restarts until their fixed expiry. Pending entry
+drafts remain process-local in this phase and must be recreated after a restart.
 
 ## Tests and lint
 

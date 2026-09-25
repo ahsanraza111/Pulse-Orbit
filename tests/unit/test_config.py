@@ -57,7 +57,32 @@ def test_orbit_requires_complete_optional_configuration() -> None:
         orbit_supabase_url="https://orbit.example",
         orbit_supabase_anon_key="public-key",
         orbit_session_encryption_key="fernet-key-placeholder",
+        database_host="127.0.0.1",
+        database_name="pulse",
+        database_user="postgres",
+        database_password="database-secret",
     )
 
     assert partial.orbit_is_configured is False
     assert complete.orbit_is_configured is True
+
+
+def test_runtime_rejects_orbit_without_postgres() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        teams_client_id="client",
+        teams_client_secret="secret",
+        teams_tenant_id="tenant",
+        groq_api_key="groq",
+        orbit_supabase_url="https://orbit.example",
+        orbit_supabase_anon_key="public-key",
+        orbit_session_encryption_key="fernet-key-placeholder",
+        database_host=None,
+        database_name=None,
+        database_user=None,
+        database_password=None,
+    )
+
+    with pytest.raises(ValueError, match="PostgreSQL configuration"):
+        settings.validate_runtime()
