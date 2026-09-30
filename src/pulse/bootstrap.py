@@ -17,7 +17,10 @@ from pulse.infrastructure.llm.groq_client import GroqLLMClient
 from pulse.infrastructure.llm.timesheet_parser import LLMTimesheetDraftParser
 from pulse.infrastructure.llm.timesheet_query_parser import LLMTimesheetQueryParser
 from pulse.infrastructure.orbit.encryption import OrbitTokenCipher
-from pulse.infrastructure.orbit.memory import InMemoryPendingEntryStore
+from pulse.infrastructure.orbit.memory import (
+    InMemoryPendingEntryStore,
+    InMemoryProjectSelectionStore,
+)
 from pulse.infrastructure.orbit.postgres import PostgresOrbitSessionStore
 from pulse.infrastructure.orbit.supabase import SupabaseOrbitClient
 
@@ -82,6 +85,7 @@ class Container:
             orbit_client,
             LLMTimesheetDraftParser(llm_client),
             InMemoryPendingEntryStore(),
+            InMemoryProjectSelectionStore(),
             confirmation_ttl_seconds=settings.orbit_confirmation_ttl_seconds,
             business_timezone=settings.orbit_business_timezone,
             max_duration_minutes=settings.orbit_max_duration_minutes,

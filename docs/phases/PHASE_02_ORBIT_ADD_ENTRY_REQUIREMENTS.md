@@ -102,14 +102,29 @@ options instead of guessing.
 - Passwords must not be sent to Groq, written to logs, stored in the database, or
   passed as command-line arguments.
 - `orbit login` must render an Adaptive Card inside Teams with a password-masked
-  input. No browser link or redirect is allowed.
+  input only when no valid session exists. If the user is already signed in,
+  it must return the editable time-entry templates instead. No browser link or
+  redirect is allowed.
 - Card submission must be handled as a dedicated bot action and must never be
   sent to Groq or rendered as a normal chat message.
 - Successful authentication must send a new Teams message rather than placing
   the success text in the login card's action-response footer.
+- On a user's first ordinary message, PULSE must check the server-side Orbit
+  session. It shows the masked login card when signed out, or the editable
+  time-entry templates when already signed in, without routing that message to
+  the general-purpose LLM.
 - The success message must offer no more than three context-specific time-entry
-  templates using `Action.Compose`. Selecting one inserts an editable `orbit add`
-  command into the compose box and must not submit it automatically.
+  templates using `Action.Compose`. Selecting one inserts a complete editable
+  entry command into the compose box and must not submit it automatically.
+- Each suggested action uses a concise button title, while its compose value
+  contains the complete editable entry format: duration, project, task, notes,
+  and date. Placeholders must use Teams-safe square brackets so they remain
+  visible in the compose box. The user should only need to replace them and send.
+- A greeting such as `hey`, `hi`, or `hello` must introduce PULSE and show an
+  **Orbit login** button. The button opens the masked login card when signed out,
+  or returns the editable entry formats when a valid session already exists.
+- Re-delivery of the same Teams message activity must not produce a second bot
+  response or fall through to general chat.
 - A password sent as ordinary Teams text must be rejected before LLM routing;
   the user must be told to delete the message, rotate the exposed password, and
   use the masked card.
@@ -143,6 +158,12 @@ options instead of guessing.
   abbreviation, plural variant, or close spelling against the live project list.
 - Multiple or low-confidence matches require user selection; the application
   must not ask the LLM to invent an identifier.
+- An ambiguous match must preserve the original parsed date, task, duration,
+  and notes in short-lived server-side state and present only the authenticated
+  employee's matching projects as Teams buttons.
+- A project button click, or a typed canonical project name while selection is
+  pending, must resume that same entry and produce the confirmation draft. It
+  must never fall through to general chat.
 - The selected project ID and canonical project name become part of the draft.
 
 ### ORB-ADD-005: Resolve active task
@@ -398,7 +419,8 @@ Phase 2 add-entry work is complete when:
 The repository now contains:
 
 - Supabase password authentication, refresh, and authenticated-user adapters.
-- Encrypted process-local session storage with replaceable storage ports.
+- PostgreSQL-backed encrypted Orbit session storage with a fixed 60-minute
+  application-session lifetime and replaceable storage ports.
 - An in-chat Teams Adaptive Card with masked email/password inputs.
 - A dedicated card-submit handler that authenticates directly against Orbit,
   does not use Groq, does not persist the password, and replaces the card with a
@@ -414,7 +436,8 @@ The repository now contains:
 
 Current MVP limitations:
 
-- Sessions and pending drafts are encrypted/in-memory and are lost on restart.
+- Pending confirmation drafts and project clarifications are process-local and
+  are lost on restart; encrypted Orbit login sessions remain in PostgreSQL.
 - Assigned projects currently rely on Orbit's user-JWT RLS behavior, matching the
   provided example. The exact `project_team_members` query remains to be verified.
 - No production Orbit call has been made by automated tests.

@@ -101,8 +101,13 @@ email and password in that card and select **Connect Orbit**. No browser link or
 redirect is used. The password is used only for that authentication attempt and
 is not stored. Never send a password as an ordinary Teams chat message. After a
 successful login, PULSE sends a separate success message with up to three
-time-entry templates. Selecting a template inserts an editable `orbit add`
-command into the Teams compose box; it is not submitted automatically.
+complete time-entry templates. Selecting a template inserts an editable command
+containing duration, project, task, notes, and date into the Teams compose box;
+it is not submitted automatically.
+
+A greeting such as `hey`, `hi`, or `hello` returns a PULSE introduction card.
+Its **Orbit login** button opens the masked sign-in card, or reports the existing
+session and returns the editable entry templates when Orbit is already connected.
 
 Prepare an entry using natural language after the command prefix:
 

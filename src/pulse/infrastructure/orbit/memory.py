@@ -6,7 +6,11 @@ from datetime import datetime
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from pulse.application.orbit_models import OrbitSession, PendingTimesheetEntry
+from pulse.application.orbit_models import (
+    OrbitSession,
+    PendingTimesheetEntry,
+    ProjectSelectionRequest,
+)
 
 
 class EncryptedInMemoryOrbitSessionStore:
@@ -75,6 +79,24 @@ class InMemoryPendingEntryStore:
     async def save(self, entry: PendingTimesheetEntry) -> None:
         async with self._lock:
             self._values[entry.teams_user_id] = entry
+
+    async def delete(self, teams_user_id: str) -> None:
+        async with self._lock:
+            self._values.pop(teams_user_id, None)
+
+
+class InMemoryProjectSelectionStore:
+    def __init__(self) -> None:
+        self._values: dict[str, ProjectSelectionRequest] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, teams_user_id: str) -> ProjectSelectionRequest | None:
+        async with self._lock:
+            return self._values.get(teams_user_id)
+
+    async def save(self, selection: ProjectSelectionRequest) -> None:
+        async with self._lock:
+            self._values[selection.teams_user_id] = selection
 
     async def delete(self, teams_user_id: str) -> None:
         async with self._lock:

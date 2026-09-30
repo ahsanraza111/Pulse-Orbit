@@ -39,6 +39,17 @@ class ParsedTimesheetDraft:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectSelectionRequest:
+    id: str
+    teams_user_id: str
+    employee_id: str
+    organization_id: str
+    parsed: ParsedTimesheetDraft
+    options: tuple[OrbitProject, ...]
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class PendingTimesheetEntry:
     id: str
     teams_user_id: str

@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
+from typing import TypeVar
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -22,8 +23,10 @@ from pulse.application.orbit_models import (
     OrbitSession,
     OrbitTask,
     OrbitTimesheetEntry,
+    ParsedTimesheetDraft,
     ParsedTimesheetQuery,
     PendingTimesheetEntry,
+    ProjectSelectionRequest,
     ResolvedTimesheetQuery,
     TimesheetEntryPage,
 )
@@ -32,6 +35,7 @@ from pulse.application.ports.orbit import (
     OrbitSessionStore,
     OrbitTimesheetPort,
     PendingEntryStore,
+    ProjectSelectionStore,
     TimesheetDraftParser,
     TimesheetQueryParser,
 )
@@ -39,6 +43,9 @@ from pulse.application.ports.orbit import (
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+OrbitEntity = TypeVar("OrbitEntity", OrbitProject, OrbitTask)
 
 
 class OrbitAuthService:
@@ -77,6 +84,14 @@ class OrbitAuthService:
             user_id = await self._auth.get_authenticated_user_id(session.access_token)
             return session, user_id
 
+    async def is_authenticated(self, teams_user_id: str) -> bool:
+        try:
+            await self.get_authenticated_session(teams_user_id)
+        except (OrbitAuthRequiredError, OrbitAuthenticationError):
+            await self._sessions.delete(teams_user_id)
+            return False
+        return True
+
     async def logout(self, teams_user_id: str) -> None:
         await self._sessions.delete(teams_user_id)
 
@@ -99,6 +114,7 @@ class OrbitAddEntryService:
         timesheet_port: OrbitTimesheetPort,
         draft_parser: TimesheetDraftParser,
         pending_store: PendingEntryStore,
+        project_selection_store: ProjectSelectionStore,
         *,
         confirmation_ttl_seconds: int,
         business_timezone: str,
@@ -110,6 +126,7 @@ class OrbitAddEntryService:
         self._timesheets = timesheet_port
         self._parser = draft_parser
         self._pending = pending_store
+        self._project_selections = project_selection_store
         self._confirmation_ttl_seconds = confirmation_ttl_seconds
         self._max_duration_minutes = max_duration_minutes
         self._max_notes_chars = max_notes_chars
@@ -120,20 +137,119 @@ class OrbitAddEntryService:
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"Unknown Orbit business timezone: {business_timezone}") from exc
 
-    async def prepare(self, teams_user_id: str, request_text: str) -> PendingTimesheetEntry:
+    async def prepare(
+        self, teams_user_id: str, request_text: str
+    ) -> PendingTimesheetEntry | ProjectSelectionRequest:
+        await self._pending.delete(teams_user_id)
+        await self._project_selections.delete(teams_user_id)
         session, auth_user_id = await self._auth.get_authenticated_session(teams_user_id)
         employee = await self._timesheets.get_employee(session.access_token, auth_user_id)
         today = self._now().astimezone(self._timezone).date()
         parsed = await self._parser.parse(request_text, today=today)
         self._validate_parsed(parsed.duration_minutes, parsed.description)
 
-        projects = await self._timesheets.list_assigned_projects(
-            session.access_token, employee.id
-        )
-        project = self._match_entity("project", parsed.project_name, projects)
-        tasks = await self._timesheets.list_active_tasks(session.access_token, project.id)
-        task = self._match_entity("task", parsed.task_name, tasks)
+        projects = await self._timesheets.list_assigned_projects(session.access_token, employee.id)
+        try:
+            project = self._match_entity("project", parsed.project_name, projects)
+        except OrbitAmbiguousMatchError as exc:
+            option_names = set(exc.options)
+            selection = ProjectSelectionRequest(
+                id=uuid4().hex,
+                teams_user_id=teams_user_id,
+                employee_id=employee.id,
+                organization_id=employee.organization_id,
+                parsed=parsed,
+                options=tuple(project for project in projects if project.name in option_names),
+                expires_at=self._now() + timedelta(seconds=self._confirmation_ttl_seconds),
+            )
+            await self._project_selections.save(selection)
+            return selection
 
+        return await self._prepare_for_project(
+            teams_user_id,
+            session.access_token,
+            employee,
+            parsed,
+            project,
+        )
+
+    async def has_project_selection(self, teams_user_id: str) -> bool:
+        selection = await self._project_selections.get(teams_user_id)
+        if not selection:
+            return False
+        if selection.expires_at <= self._now():
+            await self._project_selections.delete(teams_user_id)
+            return False
+        return True
+
+    async def select_project(
+        self,
+        teams_user_id: str,
+        *,
+        project_id: str | None = None,
+        project_name: str | None = None,
+        expected_selection_id: str | None = None,
+    ) -> PendingTimesheetEntry:
+        selection = await self._project_selections.get(teams_user_id)
+        if not selection:
+            raise OrbitNotFoundError("There is no pending project selection.")
+        if expected_selection_id is not None and selection.id != expected_selection_id:
+            raise OrbitNotFoundError(
+                "This project selection card is no longer current. Start the entry again."
+            )
+        if selection.expires_at <= self._now():
+            await self._project_selections.delete(teams_user_id)
+            raise OrbitValidationError(
+                "The project selection expired. Please create the entry again."
+            )
+
+        project: OrbitProject | None = None
+        if project_id:
+            project = next(
+                (option for option in selection.options if option.id == project_id),
+                None,
+            )
+            if not project:
+                raise OrbitValidationError("That project is not available for this entry.")
+        elif project_name:
+            cleaned_name = re.sub(
+                r"^\s*(?:orbit\s+)?project\s+", "", project_name, flags=re.IGNORECASE
+            )
+            project = self._match_entity("project", cleaned_name, selection.options)
+        else:
+            raise OrbitValidationError("Choose one of the listed Orbit projects.")
+
+        session, auth_user_id = await self._auth.get_authenticated_session(teams_user_id)
+        employee = await self._timesheets.get_employee(session.access_token, auth_user_id)
+        if (
+            employee.id != selection.employee_id
+            or employee.organization_id != selection.organization_id
+        ):
+            await self._project_selections.delete(teams_user_id)
+            raise OrbitValidationError(
+                "Your Orbit employee context changed. Please create the entry again."
+            )
+
+        entry = await self._prepare_for_project(
+            teams_user_id,
+            session.access_token,
+            employee,
+            selection.parsed,
+            project,
+        )
+        await self._project_selections.delete(teams_user_id)
+        return entry
+
+    async def _prepare_for_project(
+        self,
+        teams_user_id: str,
+        access_token: str,
+        employee: OrbitEmployee,
+        parsed: ParsedTimesheetDraft,
+        project: OrbitProject,
+    ) -> PendingTimesheetEntry:
+        tasks = await self._timesheets.list_active_tasks(access_token, project.id)
+        task = self._match_entity("task", parsed.task_name, tasks)
         entry = PendingTimesheetEntry(
             id=uuid4().hex,
             teams_user_id=teams_user_id,
@@ -188,6 +304,7 @@ class OrbitAddEntryService:
         lock = self._confirmation_locks.setdefault(teams_user_id, asyncio.Lock())
         async with lock:
             entry = await self._pending.get(teams_user_id)
+            selection = await self._project_selections.get(teams_user_id)
             if expected_pending_id is not None:
                 if not entry:
                     raise OrbitNotFoundError("There is no pending Orbit entry to cancel.")
@@ -196,7 +313,8 @@ class OrbitAddEntryService:
                         "This confirmation card is no longer current. Create a new Orbit draft."
                     )
             await self._pending.delete(teams_user_id)
-            return entry is not None
+            await self._project_selections.delete(teams_user_id)
+            return entry is not None or selection is not None
 
     def _validate_parsed(self, duration_minutes: int, description: str) -> None:
         if duration_minutes <= 0 or duration_minutes > self._max_duration_minutes:
@@ -215,8 +333,8 @@ class OrbitAddEntryService:
     def _match_entity(
         entity: str,
         requested_name: str,
-        options: Sequence[OrbitProject] | Sequence[OrbitTask],
-    ) -> OrbitProject | OrbitTask:
+        options: Sequence[OrbitEntity],
+    ) -> OrbitEntity:
         needle = requested_name.strip()
         needle_tokens = OrbitAddEntryService._name_tokens(needle)
         if not needle_tokens:
@@ -227,18 +345,14 @@ class OrbitAddEntryService:
             (item, OrbitAddEntryService._name_tokens(item.name)) for item in options
         ]
         exact = [
-            item
-            for item, tokens in normalized_options
-            if " ".join(tokens) == normalized_needle
+            item for item, tokens in normalized_options if " ".join(tokens) == normalized_needle
         ]
         if len(exact) == 1:
             return exact[0]
 
         needle_set = set(needle_tokens)
         contained = [
-            item
-            for item, tokens in normalized_options
-            if needle_set.issubset(set(tokens))
+            item for item, tokens in normalized_options if needle_set.issubset(set(tokens))
         ]
         if len(contained) == 1:
             return contained[0]
@@ -285,10 +399,7 @@ class OrbitAddEntryService:
             return 0.0
         phrase_score = SequenceMatcher(None, " ".join(requested), " ".join(candidate)).ratio()
         token_scores = [
-            max(
-                OrbitAddEntryService._token_similarity(token, option)
-                for option in candidate
-            )
+            max(OrbitAddEntryService._token_similarity(token, option) for option in candidate)
             for token in requested
         ]
         return max(phrase_score, sum(token_scores) / len(token_scores) * 0.9)
@@ -297,20 +408,13 @@ class OrbitAddEntryService:
     def _token_similarity(left: str, right: str) -> float:
         if left == right:
             return 1.0
-        if min(len(left), len(right)) >= 3 and (
-            left.startswith(right) or right.startswith(left)
-        ):
+        if min(len(left), len(right)) >= 3 and (left.startswith(right) or right.startswith(left)):
             return 0.9
         return SequenceMatcher(None, left, right).ratio()
 
     @staticmethod
-    def _verify_same_employee(
-        entry: PendingTimesheetEntry, employee: OrbitEmployee
-    ) -> None:
-        if (
-            entry.employee_id != employee.id
-            or entry.organization_id != employee.organization_id
-        ):
+    def _verify_same_employee(entry: PendingTimesheetEntry, employee: OrbitEmployee) -> None:
+        if entry.employee_id != employee.id or entry.organization_id != employee.organization_id:
             raise OrbitAuthenticationError(
                 "The Orbit identity changed. Please create the entry again."
             )
@@ -397,9 +501,7 @@ class OrbitViewEntriesService:
             projects = await self._timesheets.list_assigned_projects(
                 session.access_token, employee.id
             )
-            project = OrbitAddEntryService._match_entity(
-                "project", parsed.project_name, projects
-            )
+            project = OrbitAddEntryService._match_entity("project", parsed.project_name, projects)
             project_id = project.id
             project_name = project.name
         query = ResolvedTimesheetQuery(

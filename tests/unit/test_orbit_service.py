@@ -4,11 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from pulse.application.errors import (
-    OrbitAmbiguousMatchError,
-    OrbitNotFoundError,
-    OrbitValidationError,
-)
+from pulse.application.errors import OrbitNotFoundError, OrbitValidationError
 from pulse.application.orbit_models import (
     CreatedTimesheetEntry,
     OrbitEmployee,
@@ -18,7 +14,10 @@ from pulse.application.orbit_models import (
     ParsedTimesheetDraft,
 )
 from pulse.application.services.orbit import OrbitAddEntryService, OrbitAuthService
-from pulse.infrastructure.orbit.memory import InMemoryPendingEntryStore
+from pulse.infrastructure.orbit.memory import (
+    InMemoryPendingEntryStore,
+    InMemoryProjectSelectionStore,
+)
 
 NOW = datetime(2026, 9, 22, 12, tzinfo=UTC)
 
@@ -94,9 +93,7 @@ class FakeParser:
         return self.parsed
 
 
-def session(
-    *, access_token: str = "access", expires_at: datetime | None = None
-) -> OrbitSession:
+def session(*, access_token: str = "access", expires_at: datetime | None = None) -> OrbitSession:
     return OrbitSession(
         access_token=access_token,
         refresh_token="refresh",
@@ -120,6 +117,7 @@ def services(
         client,
         parser or FakeParser(),
         InMemoryPendingEntryStore(),
+        InMemoryProjectSelectionStore(),
         confirmation_ttl_seconds=600,
         business_timezone="Asia/Karachi",
         max_duration_minutes=1440,
@@ -190,7 +188,7 @@ async def test_stale_cancel_card_cannot_discard_newer_pending_entry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_rejects_ambiguous_project() -> None:
+async def test_prepare_preserves_ambiguous_project_for_user_selection() -> None:
     client = FakeOrbitClient()
     client.projects = [
         OrbitProject("p1", "Alpha API"),
@@ -198,10 +196,54 @@ async def test_prepare_rejects_ambiguous_project() -> None:
     ]
     _, _, add = services(client=client)
 
-    with pytest.raises(OrbitAmbiguousMatchError) as error:
-        await add.prepare("teams-user-1", "request")
+    selection = await add.prepare("teams-user-1", "request")
 
-    assert error.value.options == ["Alpha API", "Alpha Web"]
+    assert [option.name for option in selection.options] == ["Alpha API", "Alpha Web"]
+    assert selection.parsed.task_name == "API"
+    assert selection.parsed.duration_minutes == 120
+
+
+@pytest.mark.asyncio
+async def test_typed_project_selection_resumes_preserved_entry() -> None:
+    client = FakeOrbitClient()
+    client.projects = [
+        OrbitProject("p1", "ADGM Form Submissions to SP"),
+        OrbitProject("p2", "ADGM Website Development (Sitecore to Optimizely)"),
+    ]
+    parser = FakeParser(
+        ParsedTimesheetDraft(
+            "adgm",
+            "API Development",
+            date(2026, 9, 22),
+            30,
+            "ADGM standup",
+        )
+    )
+    _, _, add = services(client=client, parser=parser)
+
+    selection = await add.prepare("teams-user-1", "original request")
+    pending = await add.select_project("teams-user-1", project_name="ADGM Website Development")
+
+    assert selection.parsed.description == "ADGM standup"
+    assert pending.project_id == "p2"
+    assert pending.duration_minutes == 30
+    assert pending.description == "ADGM standup"
+    assert not await add.has_project_selection("teams-user-1")
+
+
+@pytest.mark.asyncio
+async def test_project_selection_rejects_project_outside_saved_options() -> None:
+    client = FakeOrbitClient()
+    client.projects = [OrbitProject("p1", "Alpha API"), OrbitProject("p2", "Alpha Web")]
+    _, _, add = services(client=client)
+    selection = await add.prepare("teams-user-1", "request")
+
+    with pytest.raises(OrbitValidationError, match="not available"):
+        await add.select_project(
+            "teams-user-1",
+            project_id="unassigned-project",
+            expected_selection_id=selection.id,
+        )
 
 
 @pytest.mark.asyncio
@@ -256,9 +298,7 @@ async def test_prepare_fuzzy_matches_minor_typo() -> None:
 
 @pytest.mark.asyncio
 async def test_prepare_validates_duration() -> None:
-    parser = FakeParser(
-        ParsedTimesheetDraft("Alpha", "API", date(2026, 9, 22), 0, "notes")
-    )
+    parser = FakeParser(ParsedTimesheetDraft("Alpha", "API", date(2026, 9, 22), 0, "notes"))
     _, _, add = services(parser=parser)
 
     with pytest.raises(OrbitValidationError, match="Duration"):

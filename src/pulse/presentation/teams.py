@@ -42,6 +42,7 @@ from pulse.application.orbit_models import (
     CreatedTimesheetEntry,
     OrbitTimesheetEntry,
     PendingTimesheetEntry,
+    ProjectSelectionRequest,
     ResolvedTimesheetQuery,
     TimesheetEntryPage,
 )
@@ -60,8 +61,10 @@ PASSWORD_VALUE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 ORBIT_LOGIN_ACTION = "orbit_login"
+ORBIT_OPEN_LOGIN_ACTION = "orbit_open_login"
 ORBIT_CONFIRM_ACTION = "orbit_confirm"
 ORBIT_CANCEL_ACTION = "orbit_cancel"
+ORBIT_SELECT_PROJECT_ACTION = "orbit_select_project"
 ORBIT_VIEW_PAGE_ACTION = "orbit_view_page"
 ORBIT_VIEW_DETAIL_ACTION = "orbit_view_detail"
 TIME_ENTRY_ACTION_WORDS = {"add", "create", "enter", "log", "record", "worked"}
@@ -76,6 +79,7 @@ TIME_ENTRY_DETAIL_WORDS = {
 }
 TIME_ENTRY_VIEW_WORDS = {"check", "display", "find", "get", "list", "see", "show", "view"}
 TIME_ENTRY_VIEW_TARGETS = {"entries", "entry", "hours", "time", "timesheet"}
+TIME_ENTRY_START_WORDS = {"add", "create", "enter", "log", "submit", "want"}
 
 
 class ComposeCardAction(CardAction):
@@ -164,6 +168,34 @@ def orbit_login_completed_card() -> AdaptiveCard:
     )
 
 
+def pulse_introduction_card() -> AdaptiveCard:
+    return AdaptiveCard(
+        body=[
+            TextBlock(text="Hi, I'm PULSE", size="Large", weight="Bolder"),
+            TextBlock(
+                text=(
+                    "I'm your internal AI assistant for Orbit timesheets. I can help "
+                    "you connect your Orbit account, add time entries, and view your "
+                    "timesheet without leaving Teams."
+                ),
+                wrap=True,
+            ),
+            TextBlock(
+                text="Select **Orbit login** to connect or check your Orbit session.",
+                wrap=True,
+                spacing="Medium",
+            ),
+        ],
+        actions=[
+            ExecuteAction(
+                title="Orbit login",
+                verb=ORBIT_OPEN_LOGIN_ACTION,
+                data={"action": ORBIT_OPEN_LOGIN_ACTION},
+            )
+        ],
+    )
+
+
 def orbit_confirmation_card(entry: PendingTimesheetEntry) -> AdaptiveCard:
     return AdaptiveCard(
         body=[
@@ -230,6 +262,34 @@ def orbit_entry_created_card(created: CreatedTimesheetEntry) -> AdaptiveCard:
             f"Reference: `{created.id}`"
         ),
         success=True,
+    )
+
+
+def orbit_project_selection_card(selection: ProjectSelectionRequest) -> AdaptiveCard:
+    return AdaptiveCard(
+        body=[
+            TextBlock(text="Choose Orbit project", size="Large", weight="Bolder"),
+            TextBlock(
+                text=(
+                    "I found more than one assigned project matching "
+                    f"**{selection.parsed.project_name}**. Choose the correct one to "
+                    "continue this same time entry."
+                ),
+                wrap=True,
+            ),
+        ],
+        actions=[
+            ExecuteAction(
+                title=project.name,
+                verb=ORBIT_SELECT_PROJECT_ACTION,
+                data={
+                    "action": ORBIT_SELECT_PROJECT_ACTION,
+                    "selection_id": selection.id,
+                    "project_id": project.id,
+                },
+            )
+            for project in selection.options
+        ],
     )
 
 
@@ -399,22 +459,22 @@ def orbit_timesheet_detail_card(
     )
 
 
-def time_entry_suggestions_message() -> ComposeMessageActivity:
+def time_entry_suggestions_message(*, newly_connected: bool = True) -> ComposeMessageActivity:
     templates = [
         (
             "Add today's entry",
-            "orbit add 1 hour today on <project name> project, "
-            "<task name> task. <work notes>",
+            "add 1 hour to [project name], task [task name], "
+            "notes [work notes], date today",
         ),
         (
             "Add yesterday's entry",
-            "orbit add 1 hour yesterday on <project name> project, "
-            "<task name> task. <work notes>",
+            "add 1 hour to [project name], task [task name], "
+            "notes [work notes], date yesterday",
         ),
         (
             "Add entry for a date",
-            "orbit add 1 hour on YYYY-MM-DD on <project name> project, "
-            "<task name> task. <work notes>",
+            "add 1 hour to [project name], task [task name], "
+            "notes [work notes], date YYYY-MM-DD",
         ),
     ]
     actions = [
@@ -434,8 +494,12 @@ def time_entry_suggestions_message() -> ComposeMessageActivity:
     ]
     return ComposeMessageActivity(
         text=(
-            "✅ Orbit account connected successfully.\n\n"
-            "Choose a time-entry template below. Teams will place it in your message "
+            (
+                "✅ Orbit account connected successfully.\n\n"
+                if newly_connected
+                else "✅ You are already signed in to Orbit.\n\n"
+            )
+            + "Choose a time-entry template below. Teams will place it in your message "
             "box so you can edit the duration, project, task, and notes before sending."
         ),
         suggested_actions=ComposeSuggestedActions(to=[], actions=actions),
@@ -524,6 +588,60 @@ class OrbitLoginCardHandler:
             await ctx.send(time_entry_suggestions_message())
         except Exception:
             logger.exception("Failed to send the Orbit login success message")
+
+
+class OrbitOpenLoginCardHandler:
+    def __init__(self, auth_service: OrbitAuthService) -> None:
+        self._auth = auth_service
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._responses: OrderedDict[str, AdaptiveCard] = OrderedDict()
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        operation_id = self._operation_id(ctx)
+        lock = self._locks.setdefault(operation_id, asyncio.Lock())
+        async with lock:
+            response = self._responses.get(operation_id)
+            if response is None:
+                try:
+                    if await self._auth.is_authenticated(teams_user_id(ctx)):
+                        await ctx.send(
+                            time_entry_suggestions_message(newly_connected=False)
+                        )
+                        response = orbit_status_card(
+                            "Orbit already connected",
+                            "Your editable time-entry formats are available below.",
+                            success=True,
+                        )
+                    else:
+                        response = orbit_login_card()
+                except OrbitProviderError:
+                    response = orbit_status_card(
+                        "Orbit unavailable",
+                        "PULSE could not check your Orbit session. Please try again.",
+                    )
+                except Exception:
+                    logger.exception("Unexpected error while opening Orbit login")
+                    response = orbit_status_card(
+                        "Orbit login unavailable",
+                        "Something went wrong. Please try again.",
+                    )
+                self._remember_response(operation_id, response)
+
+        return AdaptiveCardActionCardResponse(value=response)
+
+    @staticmethod
+    def _operation_id(ctx: Any) -> str:
+        activity_id = getattr(ctx.activity, "id", None)
+        if isinstance(activity_id, str) and activity_id:
+            return f"{teams_user_id(ctx)}:{activity_id}"
+        return f"{teams_user_id(ctx)}:{id(ctx.activity)}"
+
+    def _remember_response(self, operation_id: str, response: AdaptiveCard) -> None:
+        self._responses[operation_id] = response
+        self._responses.move_to_end(operation_id)
+        while len(self._responses) > 256:
+            removed_id, _ = self._responses.popitem(last=False)
+            self._locks.pop(removed_id, None)
 
 
 class OrbitConfirmCardHandler:
@@ -657,6 +775,81 @@ class OrbitCancelCardHandler:
         self._completed.move_to_end(operation_id)
         while len(self._completed) > 256:
             self._completed.popitem(last=False)
+
+
+class OrbitProjectSelectionCardHandler:
+    def __init__(self, add_service: OrbitAddEntryService) -> None:
+        self._add = add_service
+        self._started: OrderedDict[str, None] = OrderedDict()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        data = getattr(getattr(ctx.activity.value, "action", None), "data", None)
+        selection_id = data.get("selection_id") if isinstance(data, Mapping) else None
+        project_id = data.get("project_id") if isinstance(data, Mapping) else None
+        if not isinstance(selection_id, str) or not isinstance(project_id, str):
+            return AdaptiveCardActionCardResponse(
+                value=orbit_status_card(
+                    "Project selection failed",
+                    "This project selection card is invalid. Start the entry again.",
+                )
+            )
+
+        current_user_id = teams_user_id(ctx)
+        operation_id = f"{current_user_id}:{selection_id}:{project_id}"
+        if operation_id not in self._started:
+            self._remember_started(operation_id)
+            task = asyncio.create_task(
+                self._select_and_report(ctx, current_user_id, selection_id, project_id)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+        return AdaptiveCardActionCardResponse(
+            value=orbit_status_card(
+                "Resolving Orbit project",
+                "PULSE is preparing your time-entry confirmation.",
+                success=True,
+            )
+        )
+
+    async def _select_and_report(
+        self,
+        ctx: Any,
+        current_user_id: str,
+        selection_id: str,
+        project_id: str,
+    ) -> None:
+        try:
+            pending = await self._add.select_project(
+                current_user_id,
+                project_id=project_id,
+                expected_selection_id=selection_id,
+            )
+            result = orbit_confirmation_card(pending)
+        except Exception as exc:
+            if not isinstance(
+                exc,
+                (
+                    OrbitAuthenticationError,
+                    OrbitAuthRequiredError,
+                    OrbitNotFoundError,
+                    OrbitProviderError,
+                    OrbitValidationError,
+                ),
+            ):
+                logger.exception("Unexpected error while selecting an Orbit project")
+            result = _orbit_read_error_card(exc)
+        try:
+            await ctx.send(result)
+        except Exception:
+            logger.exception("Failed to send the Orbit project-selection result")
+
+    def _remember_started(self, operation_id: str) -> None:
+        self._started[operation_id] = None
+        self._started.move_to_end(operation_id)
+        while len(self._started) > 256:
+            self._started.popitem(last=False)
 
 
 def _resolved_query_from_action(data: Mapping[str, object]) -> ResolvedTimesheetQuery:
@@ -858,8 +1051,12 @@ class TeamsMessageHandler:
         self._orbit_auth = orbit_auth_service
         self._orbit_add = orbit_add_service
         self._orbit_view = orbit_view_service
+        self._seen_users: OrderedDict[str, None] = OrderedDict()
+        self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
 
     async def __call__(self, ctx: Any) -> None:
+        if not self._claim_message(ctx):
+            return
         user_text = clean_teams_text(getattr(ctx.activity, "text", None))
         try:
             if PASSWORD_VALUE_PATTERN.search(user_text):
@@ -868,8 +1065,25 @@ class TeamsMessageHandler:
                     "Delete that message, change the exposed password, then send "
                     "`orbit login` and use the masked sign-in card."
                 )
+            elif self._is_greeting(user_text):
+                self._remember_user(teams_user_id(ctx))
+                response = pulse_introduction_card()
             elif self._is_orbit_command(user_text):
+                self._remember_user(teams_user_id(ctx))
                 response = await self._handle_orbit(ctx, user_text)
+            elif self._orbit_add and await self._orbit_add.has_project_selection(
+                teams_user_id(ctx)
+            ):
+                self._remember_user(teams_user_id(ctx))
+                pending = await self._orbit_add.select_project(
+                    teams_user_id(ctx), project_name=user_text
+                )
+                response = orbit_confirmation_card(pending)
+            elif self._orbit_auth and self._is_first_message(teams_user_id(ctx)):
+                if await self._orbit_auth.is_authenticated(teams_user_id(ctx)):
+                    response = time_entry_suggestions_message(newly_connected=False)
+                else:
+                    response = orbit_login_card()
             else:
                 response = await self._chat_service.reply(user_text)
         except InvalidMessageError as exc:
@@ -891,7 +1105,37 @@ class TeamsMessageHandler:
             or TeamsMessageHandler._is_orbit_login_intent(command)
             or TeamsMessageHandler._is_time_entry_view_intent(command)
             or TeamsMessageHandler._is_time_entry_intent(command)
+            or TeamsMessageHandler._is_time_entry_start_intent(command)
         )
+
+    @staticmethod
+    def _is_greeting(text: str) -> bool:
+        words = re.findall(r"[a-z0-9]+", text.casefold())
+        return bool(words and words[0] in {"hey", "hi", "hello"})
+
+    def _is_first_message(self, current_user_id: str) -> bool:
+        if current_user_id in self._seen_users:
+            return False
+        self._remember_user(current_user_id)
+        return True
+
+    def _remember_user(self, current_user_id: str) -> None:
+        self._seen_users[current_user_id] = None
+        self._seen_users.move_to_end(current_user_id)
+        while len(self._seen_users) > 1024:
+            self._seen_users.popitem(last=False)
+
+    def _claim_message(self, ctx: Any) -> bool:
+        activity_id = getattr(ctx.activity, "id", None)
+        if not isinstance(activity_id, str) or not activity_id:
+            return True
+        if activity_id in self._processed_message_ids:
+            return False
+        self._processed_message_ids[activity_id] = None
+        self._processed_message_ids.move_to_end(activity_id)
+        while len(self._processed_message_ids) > 2048:
+            self._processed_message_ids.popitem(last=False)
+        return True
 
     @staticmethod
     def _is_orbit_login_intent(text: str) -> bool:
@@ -899,14 +1143,18 @@ class TeamsMessageHandler:
         if "orbit" not in normalized.split():
             return False
         return any(
-            phrase in normalized
-            for phrase in ("login", "log in", "signin", "sign in", "connect")
+            phrase in normalized for phrase in ("login", "log in", "signin", "sign in", "connect")
         )
 
     @staticmethod
     def _is_time_entry_intent(text: str) -> bool:
         words = set(re.findall(r"[a-z0-9]+", text.casefold()))
         return bool(words & TIME_ENTRY_ACTION_WORDS and words & TIME_ENTRY_DETAIL_WORDS)
+
+    @staticmethod
+    def _is_time_entry_start_intent(text: str) -> bool:
+        words = set(re.findall(r"[a-z0-9]+", text.casefold()))
+        return bool(words & {"entry", "timesheet"} and words & TIME_ENTRY_START_WORDS)
 
     @staticmethod
     def _is_time_entry_view_intent(text: str) -> bool:
@@ -928,6 +1176,8 @@ class TeamsMessageHandler:
 
         try:
             if self._is_orbit_login_intent(normalized):
+                if await self._orbit_auth.is_authenticated(current_teams_user_id):
+                    return time_entry_suggestions_message(newly_connected=False)
                 return orbit_login_card()
             if normalized == "orbit logout":
                 if self._orbit_add:
@@ -953,16 +1203,19 @@ class TeamsMessageHandler:
                     if cancelled
                     else "There is no pending Orbit entry to cancel."
                 )
-            if (
-                normalized.startswith(("orbit entries", "orbit list", "orbit timesheet"))
-                or self._is_time_entry_view_intent(normalized)
-            ):
+            if normalized.startswith(
+                ("orbit entries", "orbit list", "orbit timesheet")
+            ) or self._is_time_entry_view_intent(normalized):
                 if not self._orbit_view:
                     return "Orbit timesheet viewing is not configured yet."
-                page = await self._orbit_view.list_from_text(
-                    current_teams_user_id, command
-                )
+                page = await self._orbit_view.list_from_text(current_teams_user_id, command)
                 return orbit_timesheet_list_card(page)
+            if self._is_time_entry_start_intent(normalized) and not self._is_time_entry_intent(
+                normalized
+            ):
+                if await self._orbit_auth.is_authenticated(current_teams_user_id):
+                    return time_entry_suggestions_message(newly_connected=False)
+                return orbit_login_card()
             if normalized.startswith("orbit add") or self._is_time_entry_intent(normalized):
                 if not self._orbit_add:
                     return "Orbit add-entry integration is not configured yet."
@@ -975,14 +1228,18 @@ class TeamsMessageHandler:
                     raise OrbitValidationError(
                         "Provide the entry details: project, task, date, duration, and notes."
                     )
-                pending = await self._orbit_add.prepare(current_teams_user_id, request)
-                return orbit_confirmation_card(pending)
+                prepared = await self._orbit_add.prepare(current_teams_user_id, request)
+                if isinstance(prepared, ProjectSelectionRequest):
+                    return orbit_project_selection_card(prepared)
+                return orbit_confirmation_card(prepared)
             return (
                 "Orbit commands: `orbit login`, `orbit add <details>`, "
                 "`orbit list`, `orbit confirm`, `orbit cancel`, and `orbit logout`."
             )
         except OrbitAuthRequiredError:
-            return "Your Orbit account is not linked. Send `orbit login` first."
+            return orbit_login_card(
+                error="Your Orbit session is missing or expired. Sign in to continue."
+            )
         except OrbitAmbiguousMatchError as exc:
             options = ", ".join(exc.options)
             return f"Multiple Orbit {exc.entity} matches were found: {options}. Be more specific."
@@ -1036,10 +1293,18 @@ def register_teams_app(
     )
     if orbit_auth_service:
         teams_app.on_card_action_execute(
+            ORBIT_OPEN_LOGIN_ACTION,
+            OrbitOpenLoginCardHandler(orbit_auth_service),
+        )
+        teams_app.on_card_action_execute(
             ORBIT_LOGIN_ACTION,
             OrbitLoginCardHandler(orbit_auth_service),
         )
     if orbit_add_service:
+        teams_app.on_card_action_execute(
+            ORBIT_SELECT_PROJECT_ACTION,
+            OrbitProjectSelectionCardHandler(orbit_add_service),
+        )
         teams_app.on_card_action_execute(
             ORBIT_CONFIRM_ACTION,
             OrbitConfirmCardHandler(orbit_add_service),

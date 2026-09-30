@@ -14,6 +14,7 @@ from pulse.application.orbit_models import (
     ParsedTimesheetDraft,
     ParsedTimesheetQuery,
     PendingTimesheetEntry,
+    ProjectSelectionRequest,
     TimesheetEntryBatch,
 )
 
@@ -92,3 +93,10 @@ class PendingEntryStore(Protocol):
 
     async def delete(self, teams_user_id: str) -> None: ...
 
+
+class ProjectSelectionStore(Protocol):
+    async def get(self, teams_user_id: str) -> ProjectSelectionRequest | None: ...
+
+    async def save(self, selection: ProjectSelectionRequest) -> None: ...
+
+    async def delete(self, teams_user_id: str) -> None: ...
