@@ -11,13 +11,17 @@ from pulse.application.services.orbit import (
     OrbitAuthService,
     OrbitViewEntriesService,
 )
+from pulse.application.services.orbit_bulk import OrbitBulkEntryService
 from pulse.core.config import Settings
 from pulse.infrastructure.database import Database
 from pulse.infrastructure.llm.groq_client import GroqLLMClient
+from pulse.infrastructure.llm.timesheet_batch_parser import LLMTimesheetBatchParser
 from pulse.infrastructure.llm.timesheet_parser import LLMTimesheetDraftParser
 from pulse.infrastructure.llm.timesheet_query_parser import LLMTimesheetQueryParser
 from pulse.infrastructure.orbit.encryption import OrbitTokenCipher
 from pulse.infrastructure.orbit.memory import (
+    InMemoryBulkPreparationStore,
+    InMemoryPendingBatchStore,
     InMemoryPendingEntryStore,
     InMemoryProjectSelectionStore,
 )
@@ -33,6 +37,7 @@ class Container:
     chat_service: ChatService
     orbit_auth_service: OrbitAuthService | None = None
     orbit_add_service: OrbitAddEntryService | None = None
+    orbit_bulk_service: OrbitBulkEntryService | None = None
     orbit_view_service: OrbitViewEntriesService | None = None
     orbit_http_client: httpx.AsyncClient | None = None
     database: Database | None = None
@@ -80,16 +85,32 @@ class Container:
             orbit_client,
             session_store,
         )
+        pending_entry_store = InMemoryPendingEntryStore()
+        project_selection_store = InMemoryProjectSelectionStore()
         add_service = OrbitAddEntryService(
             auth_service,
             orbit_client,
             LLMTimesheetDraftParser(llm_client),
-            InMemoryPendingEntryStore(),
-            InMemoryProjectSelectionStore(),
+            pending_entry_store,
+            project_selection_store,
             confirmation_ttl_seconds=settings.orbit_confirmation_ttl_seconds,
             business_timezone=settings.orbit_business_timezone,
             max_duration_minutes=settings.orbit_max_duration_minutes,
             max_notes_chars=settings.orbit_max_notes_chars,
+        )
+        bulk_service = OrbitBulkEntryService(
+            auth_service,
+            orbit_client,
+            LLMTimesheetBatchParser(llm_client),
+            InMemoryBulkPreparationStore(),
+            InMemoryPendingBatchStore(),
+            confirmation_ttl_seconds=settings.orbit_confirmation_ttl_seconds,
+            business_timezone=settings.orbit_business_timezone,
+            max_duration_minutes=settings.orbit_max_duration_minutes,
+            max_notes_chars=settings.orbit_max_notes_chars,
+            max_templates=settings.orbit_bulk_max_templates,
+            max_range_days=settings.orbit_bulk_max_range_days,
+            max_generated_entries=settings.orbit_bulk_max_generated_entries,
         )
         view_service = OrbitViewEntriesService(
             auth_service,
@@ -104,6 +125,7 @@ class Container:
             chat_service=chat_service,
             orbit_auth_service=auth_service,
             orbit_add_service=add_service,
+            orbit_bulk_service=bulk_service,
             orbit_view_service=view_service,
             orbit_http_client=orbit_http,
             database=database,

@@ -10,15 +10,23 @@ from microsoft_teams.cards import AdaptiveCard
 
 from pulse.application.errors import OrbitAuthenticationError, ProviderError
 from pulse.application.orbit_models import (
+    BulkCreationResult,
+    BulkEntryOutcome,
+    BulkScheduleSelectionRequest,
     CreatedTimesheetEntry,
     OrbitProject,
     OrbitTimesheetEntry,
     ParsedTimesheetDraft,
+    PendingTimesheetBatch,
+    PendingTimesheetEntry,
     ProjectSelectionRequest,
+    ResolvedBulkEntryTemplate,
     ResolvedTimesheetQuery,
     TimesheetEntryPage,
 )
 from pulse.presentation.teams import (
+    OrbitBulkConfirmCardHandler,
+    OrbitBulkSelectionCardHandler,
     OrbitCancelCardHandler,
     OrbitConfirmCardHandler,
     OrbitLoginCardHandler,
@@ -127,6 +135,109 @@ class FakeOrbitAddService:
 
     async def cancel(self, teams_user_id: str, expected_pending_id: str | None = None) -> bool:
         self.cancel_received = (teams_user_id, expected_pending_id)
+        return True
+
+
+def bulk_batch() -> PendingTimesheetBatch:
+    expires_at = datetime.now(UTC) + timedelta(minutes=10)
+    templates = (
+        ResolvedBulkEntryTemplate(
+            project_id="project-1",
+            project_name="ADGM Website Development",
+            task_id="task-1",
+            task_name="Meetings and Calls",
+            duration_minutes=30,
+            description="Standup",
+        ),
+        ResolvedBulkEntryTemplate(
+            project_id="project-1",
+            project_name="ADGM Website Development",
+            task_id="task-2",
+            task_name="Backend Development",
+            duration_minutes=120,
+            description="API fix",
+        ),
+    )
+    entries = tuple(
+        PendingTimesheetEntry(
+            id=f"pending-{entry_date}-{index}",
+            teams_user_id="teams-user-1",
+            employee_id="employee-1",
+            organization_id="organization-1",
+            project_id=template.project_id,
+            project_name=template.project_name,
+            task_id=template.task_id,
+            task_name=template.task_name,
+            entry_date=entry_date,
+            duration_minutes=template.duration_minutes,
+            description=template.description,
+            expires_at=expires_at,
+        )
+        for entry_date in (date(2026, 9, 21), date(2026, 9, 22))
+        for index, template in enumerate(templates)
+    )
+    return PendingTimesheetBatch(
+        id="batch-1",
+        teams_user_id="teams-user-1",
+        employee_id="employee-1",
+        organization_id="organization-1",
+        start_date=date(2026, 9, 21),
+        end_date=date(2026, 9, 22),
+        schedule="weekdays",
+        dates=(date(2026, 9, 21), date(2026, 9, 22)),
+        templates=templates,
+        entries=entries,
+        expires_at=expires_at,
+    )
+
+
+class FakeOrbitBulkService:
+    def __init__(self, prepared=None) -> None:
+        self.prepared = prepared or bulk_batch()
+        self.prepare_received = None
+        self.schedule_received = None
+        self.entity_received = None
+        self.confirm_received = None
+        self.cancel_received = None
+
+    async def prepare(self, teams_user_id: str, request: str):
+        self.prepare_received = (teams_user_id, request)
+        return self.prepared
+
+    async def select_schedule(self, teams_user_id: str, preparation_id: str, schedule: str):
+        self.schedule_received = (teams_user_id, preparation_id, schedule)
+        return bulk_batch()
+
+    async def select_entity(
+        self,
+        teams_user_id: str,
+        preparation_id: str,
+        *,
+        entity: str,
+        template_index: int,
+        option_id: str,
+    ):
+        self.entity_received = (
+            teams_user_id,
+            preparation_id,
+            entity,
+            template_index,
+            option_id,
+        )
+        return bulk_batch()
+
+    async def confirm(self, teams_user_id: str, batch_id: str):
+        self.confirm_received = (teams_user_id, batch_id)
+        entry = bulk_batch().entries[0]
+        return BulkCreationResult(
+            batch_id=batch_id,
+            outcomes=(
+                BulkEntryOutcome(entry, "created", reference="created-1"),
+            ),
+        )
+
+    async def cancel(self, teams_user_id: str, batch_id: str | None = None):
+        self.cancel_received = (teams_user_id, batch_id)
         return True
 
 
@@ -441,6 +552,67 @@ async def test_natural_language_time_entry_routes_to_orbit_without_prefix() -> N
 
 
 @pytest.mark.asyncio
+async def test_natural_language_date_range_bulk_routes_to_bulk_service() -> None:
+    chat = FakeChatService()
+    add = FakeOrbitAddService()
+    bulk = FakeOrbitBulkService()
+    context = FakeContext(
+        "21 Sep 2026 se 30 Sep 2026 tak ye entries dal do\n"
+        "- ADGM Website, Meetings and Calls, 30 minutes, notes standup\n"
+        "- ADGM Website, Backend Development, 2 hours, notes API fix"
+    )
+
+    await TeamsMessageHandler(
+        chat,
+        FakeOrbitAuthService(authenticated=True),  # type: ignore[arg-type]
+        add,  # type: ignore[arg-type]
+        orbit_bulk_service=bulk,  # type: ignore[arg-type]
+    )(context)
+
+    assert chat.received is None
+    assert add.cancel_received == ("teams-user-1", None)
+    assert bulk.prepare_received == ("teams-user-1", context.activity.text)
+    payload = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert "Confirm Orbit bulk entries" in str(payload)
+    assert "Generated entries" in str(payload)
+    assert payload["actions"][0]["title"] == "Create all 4 entries"
+    assert payload["actions"][0]["data"] == {
+        "action": "orbit_bulk_confirm",
+        "batch_id": "batch-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_bulk_range_without_schedule_returns_interactive_schedule_card() -> None:
+    schedule_request = BulkScheduleSelectionRequest(
+        preparation_id="preparation-1",
+        start_date=date(2026, 9, 21),
+        end_date=date(2026, 9, 30),
+        template_count=3,
+    )
+    bulk = FakeOrbitBulkService(prepared=schedule_request)
+    context = FakeContext(
+        "21 Sep 2026 se 30 Sep 2026 tak 3 timesheet entries add kar do"
+    )
+
+    await TeamsMessageHandler(
+        FakeChatService(),
+        FakeOrbitAuthService(authenticated=True),  # type: ignore[arg-type]
+        FakeOrbitAddService(),  # type: ignore[arg-type]
+        orbit_bulk_service=bulk,  # type: ignore[arg-type]
+    )(context)
+
+    payload = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert "Choose bulk-entry schedule" in str(payload)
+    assert [action["title"] for action in payload["actions"]] == [
+        "Weekdays only",
+        "Every day",
+        "Cancel",
+    ]
+    assert payload["actions"][0]["data"]["schedule"] == "weekdays"
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_project_returns_selection_card() -> None:
     chat = FakeChatService()
     selection = project_selection()
@@ -616,6 +788,48 @@ async def test_confirmation_card_click_creates_entry_without_typed_message() -> 
     result = context.sent[0].model_dump(by_alias=True, exclude_none=True)
     assert "Orbit entry created" in str(result)
     assert "orbit-entry-1" in str(result)
+
+
+@pytest.mark.asyncio
+async def test_bulk_schedule_button_resumes_batch_without_typed_message() -> None:
+    bulk = FakeOrbitBulkService()
+    context = FakeCardContext(
+        {
+            "action": "orbit_bulk_schedule",
+            "preparation_id": "preparation-1",
+            "schedule": "weekdays",
+        },
+        activity_id="bulk-schedule-1",
+    )
+
+    response = await OrbitBulkSelectionCardHandler(bulk)(context)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+
+    assert isinstance(response, AdaptiveCardActionCardResponse)
+    assert "Preparing Orbit bulk entries" in str(response.value)
+    assert bulk.schedule_received == ("entra-user-1", "preparation-1", "weekdays")
+    assert len(context.sent) == 1
+    assert "Confirm Orbit bulk entries" in str(context.sent[0])
+
+
+@pytest.mark.asyncio
+async def test_bulk_confirmation_button_creates_batch_without_typed_message() -> None:
+    bulk = FakeOrbitBulkService()
+    context = FakeCardContext(
+        {"action": "orbit_bulk_confirm", "batch_id": "batch-1"},
+        activity_id="bulk-confirm-1",
+    )
+
+    response = await OrbitBulkConfirmCardHandler(bulk)(context)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+
+    assert isinstance(response, AdaptiveCardActionCardResponse)
+    assert "Creating Orbit bulk entries" in str(response.value)
+    assert bulk.confirm_received == ("entra-user-1", "batch-1")
+    assert len(context.sent) == 1
+    result = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert "Orbit bulk-entry result" in str(result)
+    assert "created-1" in str(result)
 
 
 @pytest.mark.asyncio

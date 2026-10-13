@@ -7,7 +7,9 @@ from datetime import datetime
 from cryptography.fernet import Fernet, InvalidToken
 
 from pulse.application.orbit_models import (
+    BulkPreparation,
     OrbitSession,
+    PendingTimesheetBatch,
     PendingTimesheetEntry,
     ProjectSelectionRequest,
 )
@@ -97,6 +99,42 @@ class InMemoryProjectSelectionStore:
     async def save(self, selection: ProjectSelectionRequest) -> None:
         async with self._lock:
             self._values[selection.teams_user_id] = selection
+
+    async def delete(self, teams_user_id: str) -> None:
+        async with self._lock:
+            self._values.pop(teams_user_id, None)
+
+
+class InMemoryBulkPreparationStore:
+    def __init__(self) -> None:
+        self._values: dict[str, BulkPreparation] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, teams_user_id: str) -> BulkPreparation | None:
+        async with self._lock:
+            return self._values.get(teams_user_id)
+
+    async def save(self, preparation: BulkPreparation) -> None:
+        async with self._lock:
+            self._values[preparation.teams_user_id] = preparation
+
+    async def delete(self, teams_user_id: str) -> None:
+        async with self._lock:
+            self._values.pop(teams_user_id, None)
+
+
+class InMemoryPendingBatchStore:
+    def __init__(self) -> None:
+        self._values: dict[str, PendingTimesheetBatch] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, teams_user_id: str) -> PendingTimesheetBatch | None:
+        async with self._lock:
+            return self._values.get(teams_user_id)
+
+    async def save(self, batch: PendingTimesheetBatch) -> None:
+        async with self._lock:
+            self._values[batch.teams_user_id] = batch
 
     async def delete(self, teams_user_id: str) -> None:
         async with self._lock:

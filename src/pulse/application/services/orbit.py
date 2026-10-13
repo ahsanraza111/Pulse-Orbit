@@ -150,7 +150,7 @@ class OrbitAddEntryService:
 
         projects = await self._timesheets.list_assigned_projects(session.access_token, employee.id)
         try:
-            project = self._match_entity("project", parsed.project_name, projects)
+            project = self.match_entity("project", parsed.project_name, projects)
         except OrbitAmbiguousMatchError as exc:
             option_names = set(exc.options)
             selection = ProjectSelectionRequest(
@@ -215,7 +215,7 @@ class OrbitAddEntryService:
             cleaned_name = re.sub(
                 r"^\s*(?:orbit\s+)?project\s+", "", project_name, flags=re.IGNORECASE
             )
-            project = self._match_entity("project", cleaned_name, selection.options)
+            project = self.match_entity("project", cleaned_name, selection.options)
         else:
             raise OrbitValidationError("Choose one of the listed Orbit projects.")
 
@@ -249,7 +249,7 @@ class OrbitAddEntryService:
         project: OrbitProject,
     ) -> PendingTimesheetEntry:
         tasks = await self._timesheets.list_active_tasks(access_token, project.id)
-        task = self._match_entity("task", parsed.task_name, tasks)
+        task = self.match_entity("task", parsed.task_name, tasks)
         entry = PendingTimesheetEntry(
             id=uuid4().hex,
             teams_user_id=teams_user_id,
@@ -330,7 +330,7 @@ class OrbitAddEntryService:
             )
 
     @staticmethod
-    def _match_entity(
+    def match_entity(
         entity: str,
         requested_name: str,
         options: Sequence[OrbitEntity],
@@ -501,7 +501,7 @@ class OrbitViewEntriesService:
             projects = await self._timesheets.list_assigned_projects(
                 session.access_token, employee.id
             )
-            project = OrbitAddEntryService._match_entity("project", parsed.project_name, projects)
+            project = OrbitAddEntryService.match_entity("project", parsed.project_name, projects)
             project_id = project.id
             project_name = project.name
         query = ResolvedTimesheetQuery(

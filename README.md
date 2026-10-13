@@ -1,9 +1,9 @@
 # PULSE
 
 PULSE is an internal Microsoft Teams assistant. Phase 1 proves the complete
-Teams message -> FastAPI -> Groq -> Teams reply path. Phase 2 adds a confirmed,
-user-scoped Orbit timesheet entry workflow without coupling Orbit logic to Teams
-or Groq.
+Teams message -> FastAPI -> Groq -> Teams reply path. Later phases add confirmed,
+user-scoped Orbit timesheet workflows without coupling Orbit logic to Teams or
+Groq.
 
 ## Current scope
 
@@ -12,13 +12,16 @@ or Groq.
 - Async Groq chat completion integration.
 - In-chat Orbit sign-in card, token refresh, project/task resolution, entry
   confirmation, and draft creation.
+- Single-day and date-range bulk entry preparation with one explicit confirmation.
+- Read-only, paginated Orbit timesheet listing and entry details.
 - Explicit dependency injection through a composition root.
 - Unit and HTTP tests that do not require real credentials.
 - Product and phase documentation under `docs/`.
 
-Orbit list/edit/delete and approval workflows are intentionally deferred. Product
-requirements and safety rules are captured in [the PRD](docs/PRD.md) and the
-[Phase 2 add-entry specification](docs/phases/PHASE_02_ORBIT_ADD_ENTRY_REQUIREMENTS.md).
+Orbit edit/delete and approval workflows are intentionally deferred. Product
+requirements and safety rules are captured in [the PRD](docs/PRD.md), the
+[Phase 2 add-entry specification](docs/phases/PHASE_02_ORBIT_ADD_ENTRY_REQUIREMENTS.md),
+and the [bulk-entry specification](docs/phases/PHASE_04_ORBIT_BULK_ENTRIES.md).
 
 ## Requirements
 
@@ -141,6 +144,37 @@ orbit logout
 
 Orbit sessions survive PULSE restarts until their fixed expiry. Pending entry
 drafts remain process-local in this phase and must be recreated after a restart.
+
+## Orbit bulk-entry flow
+
+Multiple entries can be prepared for one day by sending a date and a list:
+
+```text
+Add these entries for 30 Sep 2026:
+- ADGM Website, Meetings and Calls, 30 minutes, notes standup
+- ADGM Website, Backend Development, 2 hours, notes API fix
+```
+
+For a date range, list the templates once. PULSE repeats every template over the
+selected schedule:
+
+```text
+21 Sep 2026 se 30 Sep 2026 tak weekdays par ye entries dal do:
+- ADGM Website, Meetings and Calls, 30 minutes, notes standup
+- ADGM Website, Backend Development, 2 hours, notes API fix
+- Form Submission, Code Review, 1 hour, notes PR review
+```
+
+If the range message does not say `weekdays` or `every day`, PULSE asks with
+interactive buttons. Projects and tasks are resolved against the current user's
+live Orbit assignments; ambiguous names also produce selection buttons. The final
+card shows the eligible dates, templates, generated entry count, daily duration,
+and overall duration. Select **Create all entries** to run the batch, or **Cancel
+batch** to discard it. Each generated entry is reported as created, failed, or
+needing verification.
+
+Safety defaults limit one request to 10 templates, a 31-day range, and 100
+generated entries. Bulk preparation and confirmation state is process-local.
 
 ## Orbit view/list flow
 

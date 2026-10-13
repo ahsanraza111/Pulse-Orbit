@@ -39,8 +39,12 @@ from pulse.application.errors import (
     ProviderError,
 )
 from pulse.application.orbit_models import (
+    BulkCreationResult,
+    BulkEntitySelectionRequest,
+    BulkScheduleSelectionRequest,
     CreatedTimesheetEntry,
     OrbitTimesheetEntry,
+    PendingTimesheetBatch,
     PendingTimesheetEntry,
     ProjectSelectionRequest,
     ResolvedTimesheetQuery,
@@ -51,6 +55,10 @@ from pulse.application.services.orbit import (
     OrbitAddEntryService,
     OrbitAuthService,
     OrbitViewEntriesService,
+)
+from pulse.application.services.orbit_bulk import (
+    BulkPreparationResult,
+    OrbitBulkEntryService,
 )
 from pulse.core.config import Settings
 
@@ -65,11 +73,27 @@ ORBIT_OPEN_LOGIN_ACTION = "orbit_open_login"
 ORBIT_CONFIRM_ACTION = "orbit_confirm"
 ORBIT_CANCEL_ACTION = "orbit_cancel"
 ORBIT_SELECT_PROJECT_ACTION = "orbit_select_project"
+ORBIT_BULK_SCHEDULE_ACTION = "orbit_bulk_schedule"
+ORBIT_BULK_ENTITY_ACTION = "orbit_bulk_entity"
+ORBIT_BULK_CONFIRM_ACTION = "orbit_bulk_confirm"
+ORBIT_BULK_CANCEL_ACTION = "orbit_bulk_cancel"
 ORBIT_VIEW_PAGE_ACTION = "orbit_view_page"
 ORBIT_VIEW_DETAIL_ACTION = "orbit_view_detail"
-TIME_ENTRY_ACTION_WORDS = {"add", "create", "enter", "log", "record", "worked"}
+TIME_ENTRY_ACTION_WORDS = {
+    "add",
+    "create",
+    "daal",
+    "daalo",
+    "dal",
+    "dalo",
+    "enter",
+    "log",
+    "record",
+    "worked",
+}
 TIME_ENTRY_DETAIL_WORDS = {
     "entry",
+    "entries",
     "hour",
     "hours",
     "minute",
@@ -237,6 +261,224 @@ def orbit_confirmation_card(entry: PendingTimesheetEntry) -> AdaptiveCard:
                 style="destructive",
             ),
         ],
+    )
+
+
+def orbit_bulk_schedule_card(request: BulkScheduleSelectionRequest) -> AdaptiveCard:
+    range_days = (request.end_date - request.start_date).days + 1
+    return AdaptiveCard(
+        body=[
+            TextBlock(text="Choose bulk-entry schedule", size="Large", weight="Bolder"),
+            TextBlock(
+                text=(
+                    "Should every entry template repeat only on weekdays or on every "
+                    "calendar day? PULSE will not create anything until final confirmation."
+                ),
+                wrap=True,
+            ),
+            FactSet(
+                facts=[
+                    Fact(
+                        title="Date range",
+                        value=(
+                            f"{request.start_date.isoformat()} to "
+                            f"{request.end_date.isoformat()}"
+                        ),
+                    ),
+                    Fact(title="Calendar days", value=str(range_days)),
+                    Fact(title="Entry templates", value=str(request.template_count)),
+                ]
+            ),
+        ],
+        actions=[
+            ExecuteAction(
+                title="Weekdays only",
+                verb=ORBIT_BULK_SCHEDULE_ACTION,
+                data={
+                    "action": ORBIT_BULK_SCHEDULE_ACTION,
+                    "preparation_id": request.preparation_id,
+                    "schedule": "weekdays",
+                },
+            ),
+            ExecuteAction(
+                title="Every day",
+                verb=ORBIT_BULK_SCHEDULE_ACTION,
+                data={
+                    "action": ORBIT_BULK_SCHEDULE_ACTION,
+                    "preparation_id": request.preparation_id,
+                    "schedule": "all_days",
+                },
+            ),
+            ExecuteAction(
+                title="Cancel",
+                verb=ORBIT_BULK_CANCEL_ACTION,
+                data={"action": ORBIT_BULK_CANCEL_ACTION},
+                style="destructive",
+            ),
+        ],
+    )
+
+
+def orbit_bulk_entity_selection_card(
+    request: BulkEntitySelectionRequest,
+) -> AdaptiveCard:
+    return AdaptiveCard(
+        body=[
+            TextBlock(
+                text=f"Choose Orbit {request.entity}",
+                size="Large",
+                weight="Bolder",
+            ),
+            TextBlock(
+                text=(
+                    f"Entry template {request.template_index + 1} has multiple matches "
+                    f"for **{request.requested_name}**. Choose the correct {request.entity}."
+                ),
+                wrap=True,
+            ),
+        ],
+        actions=[
+            *[
+                ExecuteAction(
+                    title=option.name,
+                    verb=ORBIT_BULK_ENTITY_ACTION,
+                    data={
+                        "action": ORBIT_BULK_ENTITY_ACTION,
+                        "preparation_id": request.preparation_id,
+                        "entity": request.entity,
+                        "template_index": request.template_index,
+                        "option_id": option.id,
+                    },
+                )
+                for option in request.options
+            ],
+            ExecuteAction(
+                title="Cancel batch",
+                verb=ORBIT_BULK_CANCEL_ACTION,
+                data={"action": ORBIT_BULK_CANCEL_ACTION},
+                style="destructive",
+            ),
+        ],
+    )
+
+
+def orbit_bulk_confirmation_card(batch: PendingTimesheetBatch) -> AdaptiveCard:
+    schedule_labels = {
+        "single_day": "Single day",
+        "weekdays": "Weekdays only",
+        "all_days": "Every day",
+    }
+    daily_minutes = sum(item.duration_minutes for item in batch.templates)
+    overall_minutes = sum(item.duration_minutes for item in batch.entries)
+    body: list[Any] = [
+        TextBlock(text="Confirm Orbit bulk entries", size="Large", weight="Bolder"),
+        TextBlock(
+            text="Review the complete generated batch before creating any entries.",
+            wrap=True,
+        ),
+        FactSet(
+            facts=[
+                Fact(
+                    title="Date range",
+                    value=f"{batch.start_date.isoformat()} to {batch.end_date.isoformat()}",
+                ),
+                Fact(title="Schedule", value=schedule_labels[batch.schedule]),
+                Fact(title="Eligible days", value=str(len(batch.dates))),
+                Fact(title="Templates per day", value=str(len(batch.templates))),
+                Fact(title="Generated entries", value=str(len(batch.entries))),
+                Fact(
+                    title="Daily duration",
+                    value=TeamsMessageHandler._format_duration(daily_minutes),
+                ),
+                Fact(
+                    title="Overall duration",
+                    value=TeamsMessageHandler._format_duration(overall_minutes),
+                ),
+            ]
+        ),
+        TextBlock(text="Resolved templates", weight="Bolder", spacing="Medium"),
+    ]
+    for index, template in enumerate(batch.templates, start=1):
+        body.append(
+            TextBlock(
+                text=(
+                    f"**{index}. {template.project_name} — {template.task_name}**\n\n"
+                    f"{TeamsMessageHandler._format_duration(template.duration_minutes)} · "
+                    f"{template.description}"
+                ),
+                wrap=True,
+                separator=True,
+            )
+        )
+    body.append(
+        TextBlock(
+            text="Nothing will be created until you select **Create all entries**.",
+            wrap=True,
+            spacing="Medium",
+        )
+    )
+    return AdaptiveCard(
+        body=body,
+        actions=[
+            ExecuteAction(
+                title=f"Create all {len(batch.entries)} entries",
+                verb=ORBIT_BULK_CONFIRM_ACTION,
+                data={
+                    "action": ORBIT_BULK_CONFIRM_ACTION,
+                    "batch_id": batch.id,
+                },
+                style="positive",
+            ),
+            ExecuteAction(
+                title="Cancel batch",
+                verb=ORBIT_BULK_CANCEL_ACTION,
+                data={
+                    "action": ORBIT_BULK_CANCEL_ACTION,
+                    "batch_id": batch.id,
+                },
+                style="destructive",
+            ),
+        ],
+    )
+
+
+def orbit_bulk_preparation_card(result: BulkPreparationResult) -> AdaptiveCard:
+    if isinstance(result, BulkScheduleSelectionRequest):
+        return orbit_bulk_schedule_card(result)
+    if isinstance(result, BulkEntitySelectionRequest):
+        return orbit_bulk_entity_selection_card(result)
+    return orbit_bulk_confirmation_card(result)
+
+
+def orbit_bulk_result_card(result: BulkCreationResult) -> AdaptiveCard:
+    created = sum(item.status == "created" for item in result.outcomes)
+    failed = sum(item.status == "failed" for item in result.outcomes)
+    uncertain = sum(item.status == "uncertain" for item in result.outcomes)
+    lines = []
+    for item in result.outcomes:
+        icon = {"created": "✅", "failed": "❌", "uncertain": "⚠️"}[item.status]
+        suffix = (
+            f" · `{item.reference}`"
+            if item.reference
+            else f" · {item.message or 'No reference returned'}"
+        )
+        lines.append(
+            f"{icon} {item.entry.entry_date.isoformat()} · "
+            f"{item.entry.project_name} / {item.entry.task_name} · "
+            f"{TeamsMessageHandler._format_duration(item.entry.duration_minutes)}{suffix}"
+        )
+    return AdaptiveCard(
+        body=[
+            TextBlock(text="Orbit bulk-entry result", size="Large", weight="Bolder"),
+            FactSet(
+                facts=[
+                    Fact(title="Created", value=str(created)),
+                    Fact(title="Failed", value=str(failed)),
+                    Fact(title="Needs verification", value=str(uncertain)),
+                ]
+            ),
+            TextBlock(text="\n\n".join(lines), wrap=True, spacing="Medium"),
+        ]
     )
 
 
@@ -852,6 +1094,196 @@ class OrbitProjectSelectionCardHandler:
             self._started.popitem(last=False)
 
 
+class OrbitBulkSelectionCardHandler:
+    def __init__(self, bulk_service: OrbitBulkEntryService) -> None:
+        self._bulk = bulk_service
+        self._started: OrderedDict[str, None] = OrderedDict()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        data = getattr(getattr(ctx.activity.value, "action", None), "data", None)
+        if not isinstance(data, Mapping):
+            return AdaptiveCardActionCardResponse(
+                value=orbit_status_card(
+                    "Bulk selection failed",
+                    "This bulk-entry selection is invalid. Start the batch again.",
+                )
+            )
+        action = data.get("action")
+        preparation_id = data.get("preparation_id")
+        if action not in {ORBIT_BULK_SCHEDULE_ACTION, ORBIT_BULK_ENTITY_ACTION} or not isinstance(
+            preparation_id, str
+        ):
+            return AdaptiveCardActionCardResponse(
+                value=orbit_status_card(
+                    "Bulk selection failed",
+                    "This bulk-entry selection is invalid. Start the batch again.",
+                )
+            )
+
+        operation_id = self._operation_id(ctx, data)
+        if operation_id not in self._started:
+            self._remember_started(operation_id)
+            task = asyncio.create_task(
+                self._select_and_report(ctx, teams_user_id(ctx), data)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        return AdaptiveCardActionCardResponse(
+            value=orbit_status_card(
+                "Preparing Orbit bulk entries",
+                "PULSE is resolving the batch and will post the next step here.",
+                success=True,
+            )
+        )
+
+    async def _select_and_report(
+        self, ctx: Any, current_user_id: str, data: Mapping[str, object]
+    ) -> None:
+        try:
+            preparation_id = str(data["preparation_id"])
+            if data["action"] == ORBIT_BULK_SCHEDULE_ACTION:
+                schedule = data.get("schedule")
+                if schedule not in {"weekdays", "all_days"}:
+                    raise OrbitValidationError("Choose a valid bulk-entry schedule.")
+                result = await self._bulk.select_schedule(
+                    current_user_id,
+                    preparation_id,
+                    schedule,  # type: ignore[arg-type]
+                )
+            else:
+                entity = data.get("entity")
+                template_index = data.get("template_index")
+                option_id = data.get("option_id")
+                if (
+                    entity not in {"project", "task"}
+                    or not isinstance(template_index, int)
+                    or isinstance(template_index, bool)
+                    or not isinstance(option_id, str)
+                ):
+                    raise OrbitValidationError("Choose a valid Orbit project or task.")
+                result = await self._bulk.select_entity(
+                    current_user_id,
+                    preparation_id,
+                    entity=entity,  # type: ignore[arg-type]
+                    template_index=template_index,
+                    option_id=option_id,
+                )
+            response = orbit_bulk_preparation_card(result)
+        except Exception as exc:
+            if not isinstance(
+                exc,
+                (
+                    OrbitAuthenticationError,
+                    OrbitAuthRequiredError,
+                    OrbitNotFoundError,
+                    OrbitProviderError,
+                    OrbitValidationError,
+                ),
+            ):
+                logger.exception("Unexpected error while resolving an Orbit bulk entry")
+            response = _orbit_read_error_card(exc)
+        try:
+            await ctx.send(response)
+        except Exception:
+            logger.exception("Failed to send the Orbit bulk-entry selection result")
+
+    @staticmethod
+    def _operation_id(ctx: Any, data: Mapping[str, object]) -> str:
+        activity_id = getattr(ctx.activity, "id", None) or id(ctx.activity)
+        return f"{teams_user_id(ctx)}:{activity_id}:{data.get('action')}"
+
+    def _remember_started(self, operation_id: str) -> None:
+        self._started[operation_id] = None
+        self._started.move_to_end(operation_id)
+        while len(self._started) > 256:
+            self._started.popitem(last=False)
+
+
+class OrbitBulkConfirmCardHandler:
+    def __init__(self, bulk_service: OrbitBulkEntryService) -> None:
+        self._bulk = bulk_service
+        self._started: OrderedDict[str, None] = OrderedDict()
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        data = getattr(getattr(ctx.activity.value, "action", None), "data", None)
+        batch_id = data.get("batch_id") if isinstance(data, Mapping) else None
+        if not isinstance(batch_id, str) or not batch_id:
+            return AdaptiveCardActionCardResponse(
+                value=orbit_status_card(
+                    "Bulk confirmation failed",
+                    "This bulk confirmation card is invalid. Start the batch again.",
+                )
+            )
+        operation_id = f"{teams_user_id(ctx)}:{batch_id}"
+        if operation_id not in self._started:
+            self._remember_started(operation_id)
+            task = asyncio.create_task(
+                self._confirm_and_report(ctx, teams_user_id(ctx), batch_id)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        return AdaptiveCardActionCardResponse(
+            value=orbit_status_card(
+                "Creating Orbit bulk entries",
+                "PULSE is creating the confirmed entries and will post every result here.",
+                success=True,
+            )
+        )
+
+    async def _confirm_and_report(
+        self, ctx: Any, current_user_id: str, batch_id: str
+    ) -> None:
+        try:
+            result = await self._bulk.confirm(current_user_id, batch_id)
+            response = orbit_bulk_result_card(result)
+        except Exception as exc:
+            if not isinstance(
+                exc,
+                (
+                    OrbitAuthenticationError,
+                    OrbitAuthRequiredError,
+                    OrbitNotFoundError,
+                    OrbitProviderError,
+                    OrbitValidationError,
+                ),
+            ):
+                logger.exception("Unexpected error while confirming Orbit bulk entries")
+            response = _orbit_read_error_card(exc)
+        try:
+            await ctx.send(response)
+        except Exception:
+            logger.exception("Failed to send the Orbit bulk-entry result")
+
+    def _remember_started(self, operation_id: str) -> None:
+        self._started[operation_id] = None
+        self._started.move_to_end(operation_id)
+        while len(self._started) > 256:
+            self._started.popitem(last=False)
+
+
+class OrbitBulkCancelCardHandler:
+    def __init__(self, bulk_service: OrbitBulkEntryService) -> None:
+        self._bulk = bulk_service
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        data = getattr(getattr(ctx.activity.value, "action", None), "data", None)
+        batch_id = data.get("batch_id") if isinstance(data, Mapping) else None
+        expected_id = batch_id if isinstance(batch_id, str) and batch_id else None
+        try:
+            cancelled = await self._bulk.cancel(teams_user_id(ctx), expected_id)
+            message = (
+                "The pending bulk entry was discarded and nothing else will be created."
+                if cancelled
+                else "There is no pending Orbit bulk entry to cancel."
+            )
+            response = orbit_status_card("Orbit bulk entry cancelled", message, success=True)
+        except (OrbitNotFoundError, OrbitValidationError) as exc:
+            response = orbit_status_card("Bulk cancellation failed", str(exc))
+        return AdaptiveCardActionCardResponse(value=response)
+
+
 def _resolved_query_from_action(data: Mapping[str, object]) -> ResolvedTimesheetQuery:
     start_value = data.get("start_date")
     end_value = data.get("end_date")
@@ -1046,11 +1478,13 @@ class TeamsMessageHandler:
         orbit_auth_service: OrbitAuthService | None = None,
         orbit_add_service: OrbitAddEntryService | None = None,
         orbit_view_service: OrbitViewEntriesService | None = None,
+        orbit_bulk_service: OrbitBulkEntryService | None = None,
     ) -> None:
         self._chat_service = chat_service
         self._orbit_auth = orbit_auth_service
         self._orbit_add = orbit_add_service
         self._orbit_view = orbit_view_service
+        self._orbit_bulk = orbit_bulk_service
         self._seen_users: OrderedDict[str, None] = OrderedDict()
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
 
@@ -1152,6 +1586,14 @@ class TeamsMessageHandler:
         return bool(words & TIME_ENTRY_ACTION_WORDS and words & TIME_ENTRY_DETAIL_WORDS)
 
     @staticmethod
+    def _is_bulk_time_entry_intent(text: str) -> bool:
+        words = set(re.findall(r"[a-z0-9]+", text.casefold()))
+        has_action = bool(words & TIME_ENTRY_ACTION_WORDS)
+        explicit_bulk = bool(words & {"bulk", "entries"})
+        bullet_count = len(re.findall(r"(?m)^\s*(?:[-*]|\d+[.)])\s+", text))
+        return has_action and (explicit_bulk or bullet_count >= 2)
+
+    @staticmethod
     def _is_time_entry_start_intent(text: str) -> bool:
         words = set(re.findall(r"[a-z0-9]+", text.casefold()))
         return bool(words & {"entry", "timesheet"} and words & TIME_ENTRY_START_WORDS)
@@ -1182,6 +1624,8 @@ class TeamsMessageHandler:
             if normalized == "orbit logout":
                 if self._orbit_add:
                     await self._orbit_add.cancel(current_teams_user_id)
+                if self._orbit_bulk:
+                    await self._orbit_bulk.cancel(current_teams_user_id)
                 await self._orbit_auth.logout(current_teams_user_id)
                 return "Your local Orbit session has been removed."
             if normalized in {"confirm", "orbit confirm"}:
@@ -1195,9 +1639,15 @@ class TeamsMessageHandler:
                     f"reference: `{created.id}`."
                 )
             if normalized in {"cancel", "orbit cancel"}:
-                if not self._orbit_add:
-                    return "Orbit add-entry integration is not configured yet."
-                cancelled = await self._orbit_add.cancel(current_teams_user_id)
+                if not self._orbit_add and not self._orbit_bulk:
+                    return "Orbit entry integration is not configured yet."
+                cancelled = False
+                if self._orbit_add:
+                    cancelled = await self._orbit_add.cancel(current_teams_user_id)
+                if self._orbit_bulk:
+                    cancelled = (
+                        await self._orbit_bulk.cancel(current_teams_user_id) or cancelled
+                    )
                 return (
                     "Pending Orbit entry cancelled."
                     if cancelled
@@ -1210,6 +1660,26 @@ class TeamsMessageHandler:
                     return "Orbit timesheet viewing is not configured yet."
                 page = await self._orbit_view.list_from_text(current_teams_user_id, command)
                 return orbit_timesheet_list_card(page)
+            if normalized.startswith("orbit bulk") or self._is_bulk_time_entry_intent(
+                command
+            ):
+                if not self._orbit_bulk:
+                    return "Orbit bulk-entry integration is not configured yet."
+                if self._orbit_add:
+                    await self._orbit_add.cancel(current_teams_user_id)
+                request = command
+                if normalized.startswith("orbit bulk"):
+                    request = command[len("orbit bulk") :].strip()
+                elif normalized.startswith("orbit add"):
+                    request = command[len("orbit add") :].strip()
+                if not request:
+                    raise OrbitValidationError(
+                        "Provide at least two entries and a date or date range."
+                    )
+                prepared = await self._orbit_bulk.prepare(
+                    current_teams_user_id, request
+                )
+                return orbit_bulk_preparation_card(prepared)
             if self._is_time_entry_start_intent(normalized) and not self._is_time_entry_intent(
                 normalized
             ):
@@ -1219,6 +1689,8 @@ class TeamsMessageHandler:
             if normalized.startswith("orbit add") or self._is_time_entry_intent(normalized):
                 if not self._orbit_add:
                     return "Orbit add-entry integration is not configured yet."
+                if self._orbit_bulk:
+                    await self._orbit_bulk.cancel(current_teams_user_id)
                 request = (
                     command[len("orbit add") :].strip()
                     if normalized.startswith("orbit add")
@@ -1265,6 +1737,7 @@ def register_teams_app(
     orbit_auth_service: OrbitAuthService | None = None,
     orbit_add_service: OrbitAddEntryService | None = None,
     orbit_view_service: OrbitViewEntriesService | None = None,
+    orbit_bulk_service: OrbitBulkEntryService | None = None,
 ) -> App:
     adapter = FastAPIAdapter(app=fastapi_app)
     kwargs: dict[str, Any] = {
@@ -1289,6 +1762,7 @@ def register_teams_app(
             orbit_auth_service,
             orbit_add_service,
             orbit_view_service,
+            orbit_bulk_service,
         )
     )
     if orbit_auth_service:
@@ -1312,6 +1786,24 @@ def register_teams_app(
         teams_app.on_card_action_execute(
             ORBIT_CANCEL_ACTION,
             OrbitCancelCardHandler(orbit_add_service),
+        )
+    if orbit_bulk_service:
+        bulk_selection_handler = OrbitBulkSelectionCardHandler(orbit_bulk_service)
+        teams_app.on_card_action_execute(
+            ORBIT_BULK_SCHEDULE_ACTION,
+            bulk_selection_handler,
+        )
+        teams_app.on_card_action_execute(
+            ORBIT_BULK_ENTITY_ACTION,
+            bulk_selection_handler,
+        )
+        teams_app.on_card_action_execute(
+            ORBIT_BULK_CONFIRM_ACTION,
+            OrbitBulkConfirmCardHandler(orbit_bulk_service),
+        )
+        teams_app.on_card_action_execute(
+            ORBIT_BULK_CANCEL_ACTION,
+            OrbitBulkCancelCardHandler(orbit_bulk_service),
         )
     if orbit_view_service:
         teams_app.on_card_action_execute(

@@ -5,14 +5,17 @@ from datetime import date
 from typing import Protocol
 
 from pulse.application.orbit_models import (
+    BulkPreparation,
     CreatedTimesheetEntry,
     OrbitEmployee,
     OrbitProject,
     OrbitSession,
     OrbitTask,
     OrbitTimesheetEntry,
+    ParsedBulkTimesheetRequest,
     ParsedTimesheetDraft,
     ParsedTimesheetQuery,
+    PendingTimesheetBatch,
     PendingTimesheetEntry,
     ProjectSelectionRequest,
     TimesheetEntryBatch,
@@ -68,6 +71,10 @@ class TimesheetDraftParser(Protocol):
     async def parse(self, text: str, *, today: date) -> ParsedTimesheetDraft: ...
 
 
+class TimesheetBatchParser(Protocol):
+    async def parse(self, text: str, *, today: date) -> ParsedBulkTimesheetRequest: ...
+
+
 class TimesheetQueryParser(Protocol):
     async def parse(self, text: str, *, today: date) -> ParsedTimesheetQuery: ...
 
@@ -98,5 +105,21 @@ class ProjectSelectionStore(Protocol):
     async def get(self, teams_user_id: str) -> ProjectSelectionRequest | None: ...
 
     async def save(self, selection: ProjectSelectionRequest) -> None: ...
+
+    async def delete(self, teams_user_id: str) -> None: ...
+
+
+class BulkPreparationStore(Protocol):
+    async def get(self, teams_user_id: str) -> BulkPreparation | None: ...
+
+    async def save(self, preparation: BulkPreparation) -> None: ...
+
+    async def delete(self, teams_user_id: str) -> None: ...
+
+
+class PendingBatchStore(Protocol):
+    async def get(self, teams_user_id: str) -> PendingTimesheetBatch | None: ...
+
+    async def save(self, batch: PendingTimesheetBatch) -> None: ...
 
     async def delete(self, teams_user_id: str) -> None: ...

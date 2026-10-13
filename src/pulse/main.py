@@ -27,6 +27,7 @@ async def serve() -> None:
         container.orbit_auth_service,
         container.orbit_add_service,
         container.orbit_view_service,
+        container.orbit_bulk_service,
     )
     await teams_app.initialize()
 
