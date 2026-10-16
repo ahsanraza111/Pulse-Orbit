@@ -18,8 +18,14 @@ from pulse.application.orbit_models import (
     OrbitSession,
     OrbitTask,
     OrbitTimesheetEntry,
+    PendingEntryChange,
     PendingTimesheetEntry,
     TimesheetEntryBatch,
+)
+
+ENTRY_SELECT = (
+    "id,entry_date,duration_minutes,description,status,project_id,task_id,"
+    "project:projects(name),task:tasks(name)"
 )
 
 
@@ -174,10 +180,7 @@ class SupabaseOrbitClient:
                 f"(entry_date.gte.{start_date.isoformat()},"
                 f"entry_date.lte.{end_date.isoformat()})"
             ),
-            "select": (
-                "id,entry_date,duration_minutes,description,status,"
-                "project:projects(name),task:tasks(name)"
-            ),
+            "select": ENTRY_SELECT,
             "order": "entry_date.desc,id.desc",
             "limit": str(limit),
             "offset": str(offset),
@@ -214,10 +217,7 @@ class SupabaseOrbitClient:
             params={
                 "id": f"eq.{entry_id}",
                 "employee_id": f"eq.{employee_id}",
-                "select": (
-                    "id,entry_date,duration_minutes,description,status,"
-                    "project:projects(name),task:tasks(name)"
-                ),
+                "select": ENTRY_SELECT,
                 "limit": "2",
             },
         )
@@ -227,6 +227,83 @@ class SupabaseOrbitClient:
         if len(rows) != 1:
             raise OrbitProviderError("Orbit returned an ambiguous timesheet entry.")
         return self._parse_timesheet_entry(rows[0])
+
+    async def update_entry(
+        self, access_token: str, change: PendingEntryChange
+    ) -> OrbitTimesheetEntry:
+        after = change.after
+        fields = change.changed_fields
+        if change.kind != "update" or after is None or not fields:
+            raise OrbitProviderError("There is no Orbit entry change to apply.")
+        values: dict[str, Any] = {
+            "entry_date": after.entry_date.isoformat(),
+            "duration_minutes": after.duration_minutes,
+            "description": after.description,
+            "project_id": after.project_id,
+            "task_id": after.task_id,
+        }
+        response = await self._request(
+            "PATCH",
+            "/rest/v1/timesheet_entries",
+            access_token=access_token,
+            params={
+                "id": f"eq.{change.before.id}",
+                "employee_id": f"eq.{change.employee_id}",
+                "status": "eq.draft",
+                "select": ENTRY_SELECT,
+            },
+            json={name: values[name] for name in fields},
+            extra_headers={"Prefer": "return=representation"},
+            mutation=True,
+            mutation_message=(
+                "Orbit did not confirm whether the entry was updated. "
+                "Check Orbit before retrying."
+            ),
+        )
+        rows = self._json_list(response)
+        if not rows:
+            raise OrbitNotFoundError(
+                "Orbit did not update the entry. It was not found or is no longer a draft."
+            )
+        if len(rows) != 1:
+            raise OrbitMutationUncertainError(
+                "Orbit returned an unexpected update result. Check Orbit before retrying."
+            )
+        return self._parse_timesheet_entry(rows[0])
+
+    async def delete_entry(
+        self,
+        access_token: str,
+        *,
+        employee_id: str,
+        entry_id: str,
+    ) -> None:
+        response = await self._request(
+            "DELETE",
+            "/rest/v1/timesheet_entries",
+            access_token=access_token,
+            params={
+                "id": f"eq.{entry_id}",
+                "employee_id": f"eq.{employee_id}",
+                "status": "eq.draft",
+                "select": "id",
+            },
+            extra_headers={"Prefer": "return=representation"},
+            mutation=True,
+            mutation_message=(
+                "Orbit did not confirm whether the entry was deleted. "
+                "Check Orbit before retrying."
+            ),
+        )
+        rows = self._json_list(response)
+        if not rows:
+            raise OrbitNotFoundError(
+                "Orbit did not delete the entry. It was not found or is no longer a draft."
+            )
+        if len(rows) != 1:
+            raise OrbitMutationUncertainError(
+                "Orbit returned an unexpected delete result. Check Orbit before retrying."
+            )
 
     async def _request(
         self,
@@ -240,6 +317,10 @@ class SupabaseOrbitClient:
         authenticated: bool = True,
         auth_operation: bool = False,
         mutation: bool = False,
+        mutation_message: str = (
+            "Orbit did not confirm whether the entry was created. "
+            "Check Orbit before retrying."
+        ),
     ) -> httpx.Response:
         headers = {"apikey": self._api_key, "Accept": "application/json"}
         if json is not None:
@@ -261,10 +342,7 @@ class SupabaseOrbitClient:
             )
         except httpx.TimeoutException as exc:
             if mutation:
-                raise OrbitMutationUncertainError(
-                    "Orbit did not confirm whether the entry was created. "
-                    "Check Orbit before retrying."
-                ) from exc
+                raise OrbitMutationUncertainError(mutation_message) from exc
             raise OrbitProviderError("Orbit timed out. Please try again.") from exc
         except httpx.RequestError as exc:
             raise OrbitProviderError("Orbit is temporarily unreachable.") from exc
@@ -354,6 +432,8 @@ class SupabaseOrbitClient:
             raise OrbitProviderError("Orbit returned an invalid timesheet date.") from exc
         description = row.get("description")
         status = row.get("status")
+        project_id = row.get("project_id")
+        task_id = row.get("task_id")
         return OrbitTimesheetEntry(
             id=entry_id,
             entry_date=entry_date,
@@ -362,6 +442,8 @@ class SupabaseOrbitClient:
             status=status if isinstance(status, str) and status else "unknown",
             project_name=project["name"],
             task_name=task["name"],
+            project_id=project_id if isinstance(project_id, str) else "",
+            task_id=task_id if isinstance(task_id, str) else "",
         )
 
     @staticmethod

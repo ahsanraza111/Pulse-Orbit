@@ -1,10 +1,20 @@
+import json
 from datetime import UTC, date, datetime
 
 import httpx
 import pytest
 
-from pulse.application.errors import OrbitAuthenticationError, OrbitMutationUncertainError
-from pulse.application.orbit_models import PendingTimesheetEntry
+from pulse.application.errors import (
+    OrbitAuthenticationError,
+    OrbitMutationUncertainError,
+    OrbitNotFoundError,
+)
+from pulse.application.orbit_models import (
+    EditedEntryValues,
+    OrbitTimesheetEntry,
+    PendingEntryChange,
+    PendingTimesheetEntry,
+)
 from pulse.infrastructure.orbit.supabase import SupabaseOrbitClient
 
 
@@ -168,3 +178,134 @@ def timesheet_row() -> dict[str, object]:
         "task": {"name": "Backend Development"},
     }
 
+
+
+def update_change(**after_overrides: object) -> PendingEntryChange:
+    before = OrbitTimesheetEntry(
+        id="3c160089-5f25-4bab-a722-5179c0e5d3ae",
+        entry_date=date(2026, 9, 25),
+        duration_minutes=90,
+        description="Fixed validation",
+        status="draft",
+        project_name="ADGM Form Submissions",
+        task_name="Backend Development",
+        project_id="project-1",
+        task_id="task-1",
+    )
+    values: dict[str, object] = {
+        "project_id": "project-1",
+        "project_name": "ADGM Form Submissions",
+        "task_id": "task-1",
+        "task_name": "Backend Development",
+        "entry_date": date(2026, 9, 25),
+        "duration_minutes": 120,
+        "description": "Fixed validation",
+    }
+    values.update(after_overrides)
+    return PendingEntryChange(
+        id="change-1",
+        kind="update",
+        teams_user_id="teams-user",
+        employee_id="employee-1",
+        organization_id="organization-1",
+        before=before,
+        after=EditedEntryValues(**values),  # type: ignore[arg-type]
+        expires_at=datetime(2026, 9, 25, 13, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_entry_patches_only_changed_draft_fields_for_employee() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/rest/v1/timesheet_entries"
+        assert request.url.params["id"] == "eq.3c160089-5f25-4bab-a722-5179c0e5d3ae"
+        assert request.url.params["employee_id"] == "eq.employee-1"
+        assert request.url.params["status"] == "eq.draft"
+        assert request.headers["prefer"] == "return=representation"
+        assert json.loads(request.content) == {"duration_minutes": 120}
+        return httpx.Response(200, json=[{**timesheet_row(), "duration_minutes": 120}])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        updated = await client.update_entry("user-token", update_change())
+
+    assert updated.duration_minutes == 120
+
+
+@pytest.mark.asyncio
+async def test_update_entry_with_no_matching_draft_is_not_found() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        with pytest.raises(OrbitNotFoundError, match="no longer a draft"):
+            await client.update_entry("user-token", update_change())
+
+
+@pytest.mark.asyncio
+async def test_update_timeout_is_reported_as_uncertain_update() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        with pytest.raises(OrbitMutationUncertainError, match="updated"):
+            await client.update_entry("user-token", update_change())
+
+
+@pytest.mark.asyncio
+async def test_delete_entry_is_scoped_to_employee_draft() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.params["id"] == "eq.3c160089-5f25-4bab-a722-5179c0e5d3ae"
+        assert request.url.params["employee_id"] == "eq.employee-1"
+        assert request.url.params["status"] == "eq.draft"
+        return httpx.Response(200, json=[{"id": "3c160089-5f25-4bab-a722-5179c0e5d3ae"}])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        await client.delete_entry(
+            "user-token",
+            employee_id="employee-1",
+            entry_id="3c160089-5f25-4bab-a722-5179c0e5d3ae",
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_entry_with_no_matching_draft_is_not_found() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        with pytest.raises(OrbitNotFoundError, match="no longer a draft"):
+            await client.delete_entry("user-token", employee_id="employee-1", entry_id="e")
+
+
+@pytest.mark.asyncio
+async def test_delete_timeout_is_reported_as_uncertain_delete() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        with pytest.raises(OrbitMutationUncertainError, match="deleted"):
+            await client.delete_entry("user-token", employee_id="employee-1", entry_id="e")
+
+
+@pytest.mark.asyncio
+async def test_get_entry_returns_project_and_task_ids() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert "project_id" in request.url.params["select"]
+        return httpx.Response(
+            200, json=[{**timesheet_row(), "project_id": "project-1", "task_id": "task-1"}]
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = SupabaseOrbitClient(http, base_url="https://orbit.example", api_key="key")
+        entry = await client.get_entry("user-token", employee_id="employee-1", entry_id="e")
+
+    assert entry is not None
+    assert (entry.project_id, entry.task_id) == ("project-1", "task-1")

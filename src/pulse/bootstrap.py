@@ -12,16 +12,20 @@ from pulse.application.services.orbit import (
     OrbitViewEntriesService,
 )
 from pulse.application.services.orbit_bulk import OrbitBulkEntryService
+from pulse.application.services.orbit_modify import OrbitModifyEntryService
 from pulse.core.config import Settings
 from pulse.infrastructure.database import Database
 from pulse.infrastructure.llm.groq_client import GroqLLMClient
 from pulse.infrastructure.llm.timesheet_batch_parser import LLMTimesheetBatchParser
+from pulse.infrastructure.llm.timesheet_change_parser import LLMTimesheetChangeParser
 from pulse.infrastructure.llm.timesheet_parser import LLMTimesheetDraftParser
 from pulse.infrastructure.llm.timesheet_query_parser import LLMTimesheetQueryParser
 from pulse.infrastructure.orbit.encryption import OrbitTokenCipher
 from pulse.infrastructure.orbit.memory import (
     InMemoryBulkPreparationStore,
+    InMemoryEntrySelectionStore,
     InMemoryPendingBatchStore,
+    InMemoryPendingEntryChangeStore,
     InMemoryPendingEntryStore,
     InMemoryProjectSelectionStore,
 )
@@ -39,6 +43,7 @@ class Container:
     orbit_add_service: OrbitAddEntryService | None = None
     orbit_bulk_service: OrbitBulkEntryService | None = None
     orbit_view_service: OrbitViewEntriesService | None = None
+    orbit_modify_service: OrbitModifyEntryService | None = None
     orbit_http_client: httpx.AsyncClient | None = None
     database: Database | None = None
 
@@ -120,6 +125,18 @@ class Container:
             page_size=settings.orbit_view_page_size,
             max_range_days=settings.orbit_view_max_range_days,
         )
+        modify_service = OrbitModifyEntryService(
+            auth_service,
+            orbit_client,
+            InMemoryPendingEntryChangeStore(),
+            LLMTimesheetChangeParser(llm_client),
+            InMemoryEntrySelectionStore(),
+            confirmation_ttl_seconds=settings.orbit_confirmation_ttl_seconds,
+            max_duration_minutes=settings.orbit_max_duration_minutes,
+            max_notes_chars=settings.orbit_max_notes_chars,
+            business_timezone=settings.orbit_business_timezone,
+            max_range_days=settings.orbit_view_max_range_days,
+        )
         return cls(
             settings=settings,
             chat_service=chat_service,
@@ -127,6 +144,7 @@ class Container:
             orbit_add_service=add_service,
             orbit_bulk_service=bulk_service,
             orbit_view_service=view_service,
+            orbit_modify_service=modify_service,
             orbit_http_client=orbit_http,
             database=database,
         )

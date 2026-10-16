@@ -7,14 +7,17 @@ from typing import Protocol
 from pulse.application.orbit_models import (
     BulkPreparation,
     CreatedTimesheetEntry,
+    EntrySelectionRequest,
     OrbitEmployee,
     OrbitProject,
     OrbitSession,
     OrbitTask,
     OrbitTimesheetEntry,
     ParsedBulkTimesheetRequest,
+    ParsedEntryChangeRequest,
     ParsedTimesheetDraft,
     ParsedTimesheetQuery,
+    PendingEntryChange,
     PendingTimesheetBatch,
     PendingTimesheetEntry,
     ProjectSelectionRequest,
@@ -65,6 +68,18 @@ class OrbitTimesheetPort(Protocol):
         employee_id: str,
         entry_id: str,
     ) -> OrbitTimesheetEntry | None: ...
+
+    async def update_entry(
+        self, access_token: str, change: PendingEntryChange
+    ) -> OrbitTimesheetEntry: ...
+
+    async def delete_entry(
+        self,
+        access_token: str,
+        *,
+        employee_id: str,
+        entry_id: str,
+    ) -> None: ...
 
 
 class TimesheetDraftParser(Protocol):
@@ -121,5 +136,25 @@ class PendingBatchStore(Protocol):
     async def get(self, teams_user_id: str) -> PendingTimesheetBatch | None: ...
 
     async def save(self, batch: PendingTimesheetBatch) -> None: ...
+
+    async def delete(self, teams_user_id: str) -> None: ...
+
+
+class PendingEntryChangeStore(Protocol):
+    async def get(self, teams_user_id: str) -> PendingEntryChange | None: ...
+
+    async def save(self, change: PendingEntryChange) -> None: ...
+
+    async def delete(self, teams_user_id: str) -> None: ...
+
+
+class TimesheetChangeParser(Protocol):
+    async def parse(self, text: str, *, today: date) -> ParsedEntryChangeRequest: ...
+
+
+class EntrySelectionStore(Protocol):
+    async def get(self, teams_user_id: str) -> EntrySelectionRequest | None: ...
+
+    async def save(self, selection: EntrySelectionRequest) -> None: ...
 
     async def delete(self, teams_user_id: str) -> None: ...

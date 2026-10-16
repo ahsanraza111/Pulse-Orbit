@@ -200,6 +200,8 @@ class OrbitTimesheetEntry:
     status: str
     project_name: str
     task_name: str
+    project_id: str = ""
+    task_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,3 +215,92 @@ class TimesheetEntryPage:
     query: ResolvedTimesheetQuery
     entries: tuple[OrbitTimesheetEntry, ...]
     total_count: int
+
+
+EntryChangeKind = Literal["update", "delete"]
+
+
+@dataclass(frozen=True, slots=True)
+class EditedEntryValues:
+    project_id: str
+    project_name: str
+    task_id: str
+    task_name: str
+    entry_date: date
+    duration_minutes: int
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class EditFormContext:
+    entry: OrbitTimesheetEntry
+    projects: tuple[OrbitProject, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PendingEntryChange:
+    """A reviewed edit or delete of one draft entry, awaiting explicit confirmation."""
+
+    id: str
+    kind: EntryChangeKind
+    teams_user_id: str
+    employee_id: str
+    organization_id: str
+    before: OrbitTimesheetEntry
+    after: EditedEntryValues | None
+    expires_at: datetime
+
+    @property
+    def changed_fields(self) -> tuple[str, ...]:
+        """Names of the Orbit columns an update modifies; empty for a delete."""
+        after = self.after
+        if self.kind != "update" or after is None:
+            return ()
+        before = self.before
+        changed: list[str] = []
+        if after.entry_date != before.entry_date:
+            changed.append("entry_date")
+        if after.duration_minutes != before.duration_minutes:
+            changed.append("duration_minutes")
+        if after.description != before.description:
+            changed.append("description")
+        if after.project_id != before.project_id:
+            changed.append("project_id")
+        if after.task_id != before.task_id:
+            changed.append("task_id")
+        return tuple(changed)
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedEntryChange:
+    kind: EntryChangeKind
+    entry: OrbitTimesheetEntry
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedEntryChangeRequest:
+    """A natural-language edit/delete: which draft entry, and what to change."""
+
+    action: Literal["edit", "delete"]
+    start_date: date | None = None
+    end_date: date | None = None
+    project_name: str | None = None
+    task_name: str | None = None
+    notes_hint: str | None = None
+    new_entry_date: date | None = None
+    new_duration_minutes: int | None = None
+    new_description: str | None = None
+    new_project_name: str | None = None
+    new_task_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EntrySelectionRequest:
+    """Several draft entries matched; the user must pick one before anything is prepared."""
+
+    id: str
+    teams_user_id: str
+    employee_id: str
+    request: ParsedEntryChangeRequest
+    options: tuple[OrbitTimesheetEntry, ...]
+    expires_at: datetime

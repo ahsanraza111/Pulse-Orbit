@@ -355,10 +355,11 @@ async def test_first_message_shows_entry_templates_when_already_authenticated() 
     )(context)
 
     assert chat.received is None
-    assert len(context.sent) == 1
-    payload = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert len(context.sent) == 2
+    assert "Time-entry templates" in str(context.sent[0].model_dump())
+    payload = context.sent[-1].model_dump(by_alias=True, exclude_none=True)
     assert "already signed in" in payload["text"]
-    assert len(payload["suggestedActions"]["actions"]) == 3
+    assert len(payload["suggestedActions"]["actions"]) == 4
 
 
 @pytest.mark.asyncio
@@ -375,7 +376,7 @@ async def test_duplicate_first_message_delivery_does_not_fall_through_to_chat() 
     await handler(context)
 
     assert chat.received is None
-    assert len(context.sent) == 1
+    assert len(context.sent) == 2
 
 
 @pytest.mark.asyncio
@@ -467,8 +468,8 @@ async def test_orbit_login_returns_templates_when_session_is_already_valid() -> 
     )(context)
 
     assert chat.received is None
-    assert len(context.sent) == 1
-    payload = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert len(context.sent) == 2
+    payload = context.sent[-1].model_dump(by_alias=True, exclude_none=True)
     assert "already signed in" in payload["text"]
     assert "orbit_login" not in str(payload)
 
@@ -500,8 +501,8 @@ async def test_intro_login_button_returns_formats_when_already_signed_in() -> No
     )(context)
 
     assert "Orbit already connected" in str(response.value)
-    assert len(context.sent) == 1
-    suggestions = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    assert len(context.sent) == 2
+    suggestions = context.sent[-1].model_dump(by_alias=True, exclude_none=True)
     assert "already signed in" in suggestions["text"]
 
 
@@ -889,12 +890,13 @@ async def test_login_card_submission_authenticates_current_teams_user() -> None:
 
     assert auth.received == ("entra-user-1", "employee@example.com", "secret-password")
     assert isinstance(response, AdaptiveCardActionCardResponse)
-    assert len(context.sent) == 1
+    assert len(context.sent) == 2
+    assert "Time-entry templates" in str(context.sent[0].model_dump())
 
-    success_payload = context.sent[0].model_dump(by_alias=True, exclude_none=True)
+    success_payload = context.sent[-1].model_dump(by_alias=True, exclude_none=True)
     assert "connected successfully" in success_payload["text"]
     actions = success_payload["suggestedActions"]["actions"]
-    assert len(actions) == 3
+    assert len(actions) == 4
     assert all(action["type"] == "Action.Compose" for action in actions)
     assert all(action["value"]["type"] == "Teams.chatMessage" for action in actions)
     commands = [action["value"]["data"]["body"]["content"] for action in actions]
@@ -902,7 +904,14 @@ async def test_login_card_submission_authenticates_current_teams_user() -> None:
         "Add today's entry",
         "Add yesterday's entry",
         "Add entry for a date",
+        "Add entries for a date range",
     ]
+    assert commands[3] == (
+        "log these entries from this [from date] to [to date]\n"
+        "add 1 hour to [project name], task [task name], "
+        "notes [work notes]"
+    )
+    assert TeamsMessageHandler._is_bulk_time_entry_intent(commands[3])
     assert commands[0] == (
         "add 1 hour to [project name], task [task name], "
         "notes [work notes], date today"
@@ -932,7 +941,7 @@ async def test_duplicate_login_card_delivery_is_idempotent() -> None:
     assert isinstance(first, AdaptiveCardActionCardResponse)
     assert isinstance(second, AdaptiveCardActionCardResponse)
     assert auth.login_calls == 1
-    assert len(context.sent) == 1
+    assert len(context.sent) == 2
 
 
 @pytest.mark.asyncio

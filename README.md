@@ -14,11 +14,12 @@ Groq.
   confirmation, and draft creation.
 - Single-day and date-range bulk entry preparation with one explicit confirmation.
 - Read-only, paginated Orbit timesheet listing and entry details.
+- Confirmed edit and delete of the user's own draft entries.
 - Explicit dependency injection through a composition root.
 - Unit and HTTP tests that do not require real credentials.
 - Product and phase documentation under `docs/`.
 
-Orbit edit/delete and approval workflows are intentionally deferred. Product
+Bulk edit/delete, natural-language edit, and approval workflows are intentionally deferred. Product
 requirements and safety rules are captured in [the PRD](docs/PRD.md), the
 [Phase 2 add-entry specification](docs/phases/PHASE_02_ORBIT_ADD_ENTRY_REQUIREMENTS.md),
 and the [bulk-entry specification](docs/phases/PHASE_04_ORBIT_BULK_ENTRIES.md).
@@ -103,10 +104,12 @@ PULSE displays a password-masked Adaptive Card directly in Teams. Enter the Orbi
 email and password in that card and select **Connect Orbit**. No browser link or
 redirect is used. The password is used only for that authentication attempt and
 is not stored. Never send a password as an ordinary Teams chat message. After a
-successful login, PULSE sends a separate success message with up to three
-complete time-entry templates. Selecting a template inserts an editable command
-containing duration, project, task, notes, and date into the Teams compose box;
-it is not submitted automatically.
+successful login, PULSE sends a **Time-entry templates** card that lists each
+template (today, yesterday, a specific date, and a date range) as copyable text with
+a title, followed by a message with the first compose button. Copy a template,
+replace the bracketed parts, and send it; nothing is created until you confirm the
+card PULSE replies with. Teams may show only one compose button, so the card is the
+reliable way to see every template.
 
 A greeting such as `hey`, `hi`, or `hello` returns a PULSE introduction card.
 Its **Orbit login** button opens the masked sign-in card, or reports the existing
@@ -191,7 +194,35 @@ Results appear in a paginated Adaptive Card with canonical project/task names,
 status, notes, duration, and a displayed-page total. Select **View details** to
 load the complete entry, or **Previous** / **Next** to navigate; these buttons
 execute directly and do not require a follow-up chat message. This phase is
-read-only and does not expose edit/delete actions.
+read-only; edit and delete are separate actions described below.
+
+## Orbit edit/delete flow
+
+For a **draft** entry, **View details** shows **Edit** and **Delete** buttons.
+Submitted, approved, and rejected entries are never modified.
+
+- **Edit** opens a form prefilled with date, duration (`1h 30m`, `90m`, `1.5h`,
+  `1:30`), project, task, and notes. **Review changes** shows a before → after
+  card; select **Update entry** to apply it.
+- **Delete** shows the full entry; select **Delete entry** to permanently remove it
+  from Orbit.
+
+Edits and deletions can also be requested in plain language:
+
+```text
+edit yesterday's ADGM entry to 3 hours
+orbit update the code review entry notes to API fix
+delete today's standup entry
+```
+
+PULSE searches your draft entries (the current week unless you give dates). One
+match goes straight to the confirmation card; several matches show a selection
+card first, so it never guesses which entry to change.
+
+Nothing is sent to Orbit until the confirmation button is selected. If the entry
+changed in Orbit after review, PULSE refuses to apply the change, and a timeout is
+reported as needing verification and never retried. Pending changes are
+process-local. See [the Phase 5 specification](docs/phases/PHASE_05_ORBIT_EDIT_DELETE.md).
 
 ## Tests and lint
 

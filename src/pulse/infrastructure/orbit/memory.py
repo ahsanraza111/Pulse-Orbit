@@ -8,7 +8,9 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from pulse.application.orbit_models import (
     BulkPreparation,
+    EntrySelectionRequest,
     OrbitSession,
+    PendingEntryChange,
     PendingTimesheetBatch,
     PendingTimesheetEntry,
     ProjectSelectionRequest,
@@ -135,6 +137,42 @@ class InMemoryPendingBatchStore:
     async def save(self, batch: PendingTimesheetBatch) -> None:
         async with self._lock:
             self._values[batch.teams_user_id] = batch
+
+    async def delete(self, teams_user_id: str) -> None:
+        async with self._lock:
+            self._values.pop(teams_user_id, None)
+
+
+class InMemoryPendingEntryChangeStore:
+    def __init__(self) -> None:
+        self._values: dict[str, PendingEntryChange] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, teams_user_id: str) -> PendingEntryChange | None:
+        async with self._lock:
+            return self._values.get(teams_user_id)
+
+    async def save(self, change: PendingEntryChange) -> None:
+        async with self._lock:
+            self._values[change.teams_user_id] = change
+
+    async def delete(self, teams_user_id: str) -> None:
+        async with self._lock:
+            self._values.pop(teams_user_id, None)
+
+
+class InMemoryEntrySelectionStore:
+    def __init__(self) -> None:
+        self._values: dict[str, EntrySelectionRequest] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, teams_user_id: str) -> EntrySelectionRequest | None:
+        async with self._lock:
+            return self._values.get(teams_user_id)
+
+    async def save(self, selection: EntrySelectionRequest) -> None:
+        async with self._lock:
+            self._values[selection.teams_user_id] = selection
 
     async def delete(self, teams_user_id: str) -> None:
         async with self._lock:
