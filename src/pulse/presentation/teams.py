@@ -28,6 +28,7 @@ from microsoft_teams.cards import (
     FactSet,
     TextBlock,
     TextInput,
+    TimeInput,
 )
 
 from pulse.application.errors import (
@@ -40,6 +41,7 @@ from pulse.application.errors import (
     OrbitProviderError,
     OrbitValidationError,
     ProviderError,
+    ReminderError,
 )
 from pulse.application.orbit_models import (
     AppliedEntryChange,
@@ -57,6 +59,8 @@ from pulse.application.orbit_models import (
     ResolvedTimesheetQuery,
     TimesheetEntryPage,
 )
+from pulse.application.ports.reminders import ReminderDelivery
+from pulse.application.reminder_models import ReminderSubscription
 from pulse.application.services.chat import ChatService
 from pulse.application.services.orbit import (
     OrbitAddEntryService,
@@ -68,6 +72,7 @@ from pulse.application.services.orbit_bulk import (
     OrbitBulkEntryService,
 )
 from pulse.application.services.orbit_modify import OrbitModifyEntryService
+from pulse.application.services.reminders import ReminderService, format_clock_time
 from pulse.core.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -93,6 +98,24 @@ ORBIT_DELETE_START_ACTION = "orbit_delete_start"
 ORBIT_CHANGE_CONFIRM_ACTION = "orbit_change_confirm"
 ORBIT_CHANGE_CANCEL_ACTION = "orbit_change_cancel"
 ORBIT_ENTRY_SELECT_ACTION = "orbit_entry_select"
+ORBIT_REMINDER_ADD_ACTION = "orbit_reminder_add"
+ORBIT_REMINDER_SNOOZE_ACTION = "orbit_reminder_snooze"
+ORBIT_REMINDER_SKIP_ACTION = "orbit_reminder_skip"
+ORBIT_REMINDER_OFF_ACTION = "orbit_reminder_off"
+ORBIT_REMINDER_ON_ACTION = "orbit_reminder_on"
+ORBIT_REMINDER_SET_TIME_ACTION = "orbit_reminder_set_time"
+ORBIT_REMINDER_ACTIONS = (
+    ORBIT_REMINDER_ADD_ACTION,
+    ORBIT_REMINDER_SNOOZE_ACTION,
+    ORBIT_REMINDER_SKIP_ACTION,
+    ORBIT_REMINDER_OFF_ACTION,
+    ORBIT_REMINDER_ON_ACTION,
+    ORBIT_REMINDER_SET_TIME_ACTION,
+)
+REMINDER_TURN_OFF_NOTICE = (
+    "Sign in to Orbit to turn off reminders. They will be turned off as soon as you "
+    "sign in."
+)
 ENTRY_CHANGE_WORDS = {
     "badal",
     "badlo",
@@ -169,9 +192,12 @@ def teams_user_id(ctx: Any) -> str:
     return user_id
 
 
-def orbit_login_card(*, email: str = "", error: str | None = None) -> AdaptiveCard:
+def orbit_login_card(
+    *, email: str = "", error: str | None = None, notice: str | None = None
+) -> AdaptiveCard:
     body = [
         TextBlock(text="Connect your Orbit account", size="Large", weight="Bolder"),
+        *([TextBlock(text=notice, wrap=True, weight="Bolder")] if notice else []),
         TextBlock(
             text=(
                 "Enter your Orbit credentials below. The password field is masked and "
@@ -1112,9 +1138,168 @@ def time_entry_help_messages(
     return [time_entry_templates_card(), suggestions]
 
 
-class OrbitLoginCardHandler:
-    def __init__(self, auth_service: OrbitAuthService) -> None:
+def orbit_reminder_card() -> AdaptiveCard:
+    return AdaptiveCard(
+        body=[
+            TextBlock(text="Timesheet reminder", size="Large", weight="Bolder"),
+            TextBlock(text="Have you filled in today's Orbit timesheet?", wrap=True),
+        ],
+        actions=[
+            ExecuteAction(
+                title="Add entry",
+                verb=ORBIT_REMINDER_ADD_ACTION,
+                data={"action": ORBIT_REMINDER_ADD_ACTION},
+                style="positive",
+            ),
+            ExecuteAction(
+                title="Snooze",
+                verb=ORBIT_REMINDER_SNOOZE_ACTION,
+                data={"action": ORBIT_REMINDER_SNOOZE_ACTION},
+            ),
+            ExecuteAction(
+                title="Skip today",
+                verb=ORBIT_REMINDER_SKIP_ACTION,
+                data={"action": ORBIT_REMINDER_SKIP_ACTION},
+            ),
+            ExecuteAction(
+                title="Turn off reminders",
+                verb=ORBIT_REMINDER_OFF_ACTION,
+                data={"action": ORBIT_REMINDER_OFF_ACTION},
+                style="destructive",
+            ),
+        ],
+    )
+
+
+def orbit_reminder_settings_card(subscription: ReminderSubscription) -> AdaptiveCard:
+    toggle = (
+        ExecuteAction(
+            title="Turn off reminders",
+            verb=ORBIT_REMINDER_OFF_ACTION,
+            data={"action": ORBIT_REMINDER_OFF_ACTION},
+            style="destructive",
+        )
+        if subscription.enabled
+        else ExecuteAction(
+            title="Turn on reminders",
+            verb=ORBIT_REMINDER_ON_ACTION,
+            data={"action": ORBIT_REMINDER_ON_ACTION},
+            style="positive",
+        )
+    )
+    return AdaptiveCard(
+        body=[
+            TextBlock(text="Timesheet reminders", size="Large", weight="Bolder"),
+            FactSet(
+                facts=[
+                    Fact(title="Status", value="On" if subscription.enabled else "Off"),
+                    Fact(title="Days", value="Monday to Friday"),
+                    Fact(title="Time", value=format_clock_time(subscription.reminder_time)),
+                ]
+            ),
+            TimeInput(
+                id="reminder_time",
+                label="Reminder time",
+                value=subscription.reminder_time.strftime("%H:%M"),
+            ),
+        ],
+        actions=[
+            ExecuteAction(
+                title="Save time",
+                verb=ORBIT_REMINDER_SET_TIME_ACTION,
+                data={"action": ORBIT_REMINDER_SET_TIME_ACTION},
+                style="positive",
+            ),
+            toggle,
+        ],
+    )
+
+
+class OrbitReminderCardHandler:
+    """Reminder-card buttons. Turning reminders off requires an Orbit sign-in first."""
+
+    def __init__(self, reminders: ReminderService, auth_service: OrbitAuthService) -> None:
+        self._reminders = reminders
         self._auth = auth_service
+
+    async def __call__(self, ctx: Any) -> AdaptiveCardActionCardResponse:
+        data = _action_data(ctx)
+        action = data.get("action") if data else None
+        try:
+            user_id = teams_user_id(ctx)
+            if action == ORBIT_REMINDER_SNOOZE_ACTION:
+                until = await self._reminders.snooze(user_id)
+                card = orbit_status_card(
+                    "Reminder snoozed",
+                    f"I will remind you again at {format_clock_time(until.time())}.",
+                    success=True,
+                )
+            elif action == ORBIT_REMINDER_SKIP_ACTION:
+                await self._reminders.skip_today(user_id)
+                card = orbit_status_card(
+                    "Reminder skipped",
+                    "No more reminders today. You will hear from me on the next working day.",
+                    success=True,
+                )
+            elif action == ORBIT_REMINDER_ADD_ACTION:
+                for message in time_entry_help_messages(newly_connected=False):
+                    await ctx.send(message)
+                card = orbit_status_card(
+                    "Time-entry templates", "The templates are posted below.", success=True
+                )
+            elif action == ORBIT_REMINDER_OFF_ACTION:
+                card = await self.turn_off_card(user_id)
+            elif action == ORBIT_REMINDER_ON_ACTION:
+                await self._reminders.turn_on(user_id)
+                card = orbit_status_card(
+                    "Reminders turned on",
+                    "I will remind you on working days. Change the time with "
+                    "`orbit reminders`.",
+                    success=True,
+                )
+            elif action == ORBIT_REMINDER_SET_TIME_ACTION:
+                reminder_time = await self._reminders.set_time(
+                    user_id, _text_field(data or {}, "reminder_time")
+                )
+                card = orbit_status_card(
+                    "Reminder time saved",
+                    f"I will remind you at {format_clock_time(reminder_time)} on working days.",
+                    success=True,
+                )
+            else:
+                card = orbit_status_card("Reminder unavailable", "This button is not valid.")
+        except ReminderError as exc:
+            card = orbit_status_card("Reminder settings", str(exc))
+        except OrbitAuthenticationError:
+            card = orbit_status_card("Reminder settings", "Your Teams identity is unavailable.")
+        except Exception:
+            logger.exception("Unexpected error while handling a reminder card action")
+            card = orbit_status_card(
+                "Reminder settings", "Something went wrong. Please try again."
+            )
+        return AdaptiveCardActionCardResponse(value=card)
+
+    async def turn_off_card(self, user_id: str) -> AdaptiveCard:
+        authenticated = await self._auth.is_authenticated(user_id)
+        outcome = await self._reminders.request_turn_off(user_id, authenticated=authenticated)
+        if outcome == "off":
+            return orbit_status_card(
+                "Reminders turned off",
+                "Daily timesheet reminders are off. Turn them back on with "
+                "`orbit reminders on`.",
+                success=True,
+            )
+        return orbit_login_card(notice=REMINDER_TURN_OFF_NOTICE)
+
+
+class OrbitLoginCardHandler:
+    def __init__(
+        self,
+        auth_service: OrbitAuthService,
+        reminder_service: ReminderService | None = None,
+    ) -> None:
+        self._auth = auth_service
+        self._reminders = reminder_service
         self._submission_locks: dict[str, asyncio.Lock] = {}
         self._completed_submissions: OrderedDict[str, None] = OrderedDict()
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -1138,7 +1323,10 @@ class OrbitLoginCardHandler:
                 if submission_id not in self._completed_submissions:
                     await self._auth.login(teams_user_id(ctx), email, password)
                     self._remember_completed(submission_id)
-                    self._schedule_success_message(ctx)
+                    reminders_turned_off = await self._complete_reminder_opt_out(ctx)
+                    self._schedule_success_message(
+                        ctx, reminders_turned_off=reminders_turned_off
+                    )
         except OrbitAuthenticationError:
             return AdaptiveCardActionCardResponse(
                 value=orbit_login_card(
@@ -1183,14 +1371,33 @@ class OrbitLoginCardHandler:
         while len(self._completed_submissions) > 256:
             self._completed_submissions.popitem(last=False)
 
-    def _schedule_success_message(self, ctx: Any) -> None:
-        task = asyncio.create_task(self._send_success_message(ctx))
+    def _schedule_success_message(self, ctx: Any, *, reminders_turned_off: bool = False) -> None:
+        task = asyncio.create_task(self._send_success_message(ctx, reminders_turned_off))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    @staticmethod
-    async def _send_success_message(ctx: Any) -> None:
+    async def _complete_reminder_opt_out(self, ctx: Any) -> bool:
+        if self._reminders is None:
+            return False
         try:
+            return await self._reminders.complete_pending_opt_out(teams_user_id(ctx))
+        except Exception:
+            logger.exception("Failed to apply the pending reminder opt-out after login")
+            return False
+
+    @staticmethod
+    async def _send_success_message(ctx: Any, reminders_turned_off: bool = False) -> None:
+        try:
+            if reminders_turned_off:
+                await ctx.send(
+                    orbit_status_card(
+                        "Reminders turned off",
+                        "Daily timesheet reminders are off. Turn them back on any time "
+                        "with `orbit reminders on`.",
+                        success=True,
+                    )
+                )
+            # The compose suggestions must be the last message so Teams keeps showing them.
             for message in time_entry_help_messages():
                 await ctx.send(message)
         except Exception:
@@ -2096,6 +2303,7 @@ class TeamsMessageHandler:
         orbit_view_service: OrbitViewEntriesService | None = None,
         orbit_bulk_service: OrbitBulkEntryService | None = None,
         orbit_modify_service: OrbitModifyEntryService | None = None,
+        reminder_service: ReminderService | None = None,
     ) -> None:
         self._chat_service = chat_service
         self._orbit_auth = orbit_auth_service
@@ -2103,12 +2311,14 @@ class TeamsMessageHandler:
         self._orbit_view = orbit_view_service
         self._orbit_bulk = orbit_bulk_service
         self._orbit_modify = orbit_modify_service
+        self._reminders = reminder_service
         self._seen_users: OrderedDict[str, None] = OrderedDict()
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
 
     async def __call__(self, ctx: Any) -> None:
         if not self._claim_message(ctx):
             return
+        await self._remember_conversation(ctx)
         user_text = clean_teams_text(getattr(ctx.activity, "text", None))
         try:
             if PASSWORD_VALUE_PATTERN.search(user_text):
@@ -2238,6 +2448,50 @@ class TeamsMessageHandler:
         )
         return explicit_view or work_question
 
+    async def _remember_conversation(self, ctx: Any) -> None:
+        """Record where to reach this user so reminders can be delivered to their chat."""
+        if self._reminders is None:
+            return
+        conversation = getattr(ctx.activity, "conversation", None)
+        service_url = getattr(ctx.activity, "service_url", None)
+        conversation_id = getattr(conversation, "id", None)
+        if (
+            getattr(conversation, "conversation_type", None) != "personal"
+            or not isinstance(conversation_id, str)
+            or not isinstance(service_url, str)
+        ):
+            return
+        try:
+            await self._reminders.register_conversation(
+                teams_user_id(ctx), conversation_id, service_url
+            )
+        except Exception:
+            logger.exception("Failed to record the reminder conversation")
+
+    async def _handle_reminder_command(self, ctx: Any, normalized: str) -> str | AdaptiveCard:
+        if self._reminders is None or self._orbit_auth is None:
+            return "Reminders are not configured yet."
+        user_id = teams_user_id(ctx)
+        rest = re.sub(r"^orbit\s+remind(?:ers?)?", "", normalized).strip()
+        if not rest:
+            return orbit_reminder_settings_card(await self._reminders.get_settings(user_id))
+        if rest == "on":
+            await self._reminders.turn_on(user_id)
+            return "Daily timesheet reminders are on."
+        if rest == "off":
+            return await OrbitReminderCardHandler(self._reminders, self._orbit_auth).turn_off_card(
+                user_id
+            )
+        if rest.startswith("time"):
+            reminder_time = await self._reminders.set_time(user_id, rest[len("time") :])
+            return (
+                f"Reminder time saved: {format_clock_time(reminder_time)} on working days."
+            )
+        return (
+            "Reminder commands: `orbit reminders`, `orbit reminders on`, "
+            "`orbit reminders off`, and `orbit reminders time 6:00 PM`."
+        )
+
     async def _handle_orbit(
         self, ctx: Any, text: str
     ) -> str | AdaptiveCard | list[AdaptiveCard | ComposeMessageActivity]:
@@ -2252,6 +2506,8 @@ class TeamsMessageHandler:
                 if await self._orbit_auth.is_authenticated(current_teams_user_id):
                     return time_entry_help_messages(newly_connected=False)
                 return orbit_login_card()
+            if normalized.startswith(("orbit reminder", "orbit remind")):
+                return await self._handle_reminder_command(ctx, normalized)
             if normalized == "orbit logout":
                 if self._orbit_add:
                     await self._orbit_add.cancel(current_teams_user_id)
@@ -2361,7 +2617,7 @@ class TeamsMessageHandler:
         except OrbitAmbiguousMatchError as exc:
             options = ", ".join(exc.options)
             return f"Multiple Orbit {exc.entity} matches were found: {options}. Be more specific."
-        except (OrbitValidationError, OrbitNotFoundError) as exc:
+        except (OrbitValidationError, OrbitNotFoundError, ReminderError) as exc:
             return str(exc)
         except OrbitAuthenticationError:
             return "Orbit authentication failed. Send `orbit login` and try again."
@@ -2376,6 +2632,15 @@ class TeamsMessageHandler:
         return f"{hours}h {remainder:02d}m"
 
 
+def teams_reminder_delivery(teams_app: App) -> ReminderDelivery:
+    """Deliver the reminder card proactively to a user's personal Teams chat."""
+
+    async def deliver(conversation_id: str, service_url: str) -> None:
+        await teams_app.send(conversation_id, orbit_reminder_card(), service_url=service_url)
+
+    return deliver
+
+
 def register_teams_app(
     fastapi_app: FastAPI,
     settings: Settings,
@@ -2385,6 +2650,7 @@ def register_teams_app(
     orbit_view_service: OrbitViewEntriesService | None = None,
     orbit_bulk_service: OrbitBulkEntryService | None = None,
     orbit_modify_service: OrbitModifyEntryService | None = None,
+    reminder_service: ReminderService | None = None,
 ) -> App:
     adapter = FastAPIAdapter(app=fastapi_app)
     kwargs: dict[str, Any] = {
@@ -2411,6 +2677,7 @@ def register_teams_app(
             orbit_view_service,
             orbit_bulk_service,
             orbit_modify_service,
+            reminder_service,
         )
     )
     if orbit_auth_service:
@@ -2420,7 +2687,7 @@ def register_teams_app(
         )
         teams_app.on_card_action_execute(
             ORBIT_LOGIN_ACTION,
-            OrbitLoginCardHandler(orbit_auth_service),
+            OrbitLoginCardHandler(orbit_auth_service, reminder_service),
         )
     if orbit_add_service:
         teams_app.on_card_action_execute(
@@ -2462,6 +2729,10 @@ def register_teams_app(
             ORBIT_VIEW_DETAIL_ACTION,
             OrbitViewDetailCardHandler(orbit_view_service),
         )
+    if reminder_service and orbit_auth_service:
+        reminder_handler = OrbitReminderCardHandler(reminder_service, orbit_auth_service)
+        for reminder_verb in ORBIT_REMINDER_ACTIONS:
+            teams_app.on_card_action_execute(reminder_verb, reminder_handler)
     if orbit_modify_service:
         teams_app.on_card_action_execute(
             ORBIT_EDIT_START_ACTION,

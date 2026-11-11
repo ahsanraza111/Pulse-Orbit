@@ -13,6 +13,7 @@ from pulse.application.services.orbit import (
 )
 from pulse.application.services.orbit_bulk import OrbitBulkEntryService
 from pulse.application.services.orbit_modify import OrbitModifyEntryService
+from pulse.application.services.reminders import ReminderService
 from pulse.core.config import Settings
 from pulse.infrastructure.database import Database
 from pulse.infrastructure.llm.groq_client import GroqLLMClient
@@ -31,6 +32,8 @@ from pulse.infrastructure.orbit.memory import (
 )
 from pulse.infrastructure.orbit.postgres import PostgresOrbitSessionStore
 from pulse.infrastructure.orbit.supabase import SupabaseOrbitClient
+from pulse.infrastructure.reminders.dispatcher import ReminderDispatcher
+from pulse.infrastructure.reminders.postgres import PostgresReminderStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +47,8 @@ class Container:
     orbit_bulk_service: OrbitBulkEntryService | None = None
     orbit_view_service: OrbitViewEntriesService | None = None
     orbit_modify_service: OrbitModifyEntryService | None = None
+    reminder_service: ReminderService | None = None
+    reminder_dispatcher: ReminderDispatcher | None = None
     orbit_http_client: httpx.AsyncClient | None = None
     database: Database | None = None
 
@@ -137,6 +142,16 @@ class Container:
             business_timezone=settings.orbit_business_timezone,
             max_range_days=settings.orbit_view_max_range_days,
         )
+        reminder_dispatcher = ReminderDispatcher()
+        reminder_service = ReminderService(
+            PostgresReminderStore(database.sessions),
+            reminder_dispatcher,
+            business_timezone=settings.orbit_business_timezone,
+            default_time=settings.reminder_default_time,
+            grace_minutes=settings.reminder_grace_minutes,
+            snooze_minutes=settings.reminder_snooze_minutes,
+            max_send_failures=settings.reminder_max_send_failures,
+        )
         return cls(
             settings=settings,
             chat_service=chat_service,
@@ -145,6 +160,8 @@ class Container:
             orbit_bulk_service=bulk_service,
             orbit_view_service=view_service,
             orbit_modify_service=modify_service,
+            reminder_service=reminder_service,
+            reminder_dispatcher=reminder_dispatcher,
             orbit_http_client=orbit_http,
             database=database,
         )

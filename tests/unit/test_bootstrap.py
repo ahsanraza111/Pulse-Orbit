@@ -30,6 +30,8 @@ async def test_container_wires_optional_orbit_services() -> None:
         assert container.orbit_add_service is not None
         assert container.orbit_bulk_service is not None
         assert container.orbit_modify_service is not None
+        assert container.reminder_service is not None
+        assert container.reminder_dispatcher is not None
         assert container.orbit_view_service is not None
         assert container.orbit_http_client is not None
         assert container.database is not None

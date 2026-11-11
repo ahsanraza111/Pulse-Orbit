@@ -2,9 +2,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time
 
-from sqlalchemy import URL, DateTime, Index, String, Text, select
+from sqlalchemy import (
+    URL,
+    Boolean,
+    Date,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    Time,
+    select,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -44,6 +55,28 @@ class OrbitSessionRecord(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class ReminderSubscriptionRecord(Base):
+    __tablename__ = "reminder_subscriptions"
+    __table_args__ = (
+        Index("ix_reminder_subscriptions_enabled_time", "enabled", "reminder_time"),
+    )
+
+    teams_user_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    service_url: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    reminder_time: Mapped[time] = mapped_column(Time, nullable=False)
+    last_sent_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    snoozed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    skip_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    opt_out_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 def build_database_url(settings: Settings) -> URL:

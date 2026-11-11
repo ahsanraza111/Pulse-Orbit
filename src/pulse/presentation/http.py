@@ -1,16 +1,19 @@
+import secrets
 from collections.abc import Awaitable, Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from pulse.core.config import Settings
 
 DatabaseProbe = Callable[[], Awaitable[bool]]
+ReminderTick = Callable[[], Awaitable[int]]
 
 
 def create_http_app(
     settings: Settings,
     database_probe: DatabaseProbe | None = None,
+    reminder_tick: ReminderTick | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="PULSE",
@@ -47,4 +50,17 @@ def create_http_app(
             "database_connected": database_connected,
         }
         return JSONResponse(payload, status_code=200 if ready else 503)
+
+    cron_secret = settings.reminder_cron_secret
+    if reminder_tick is not None and cron_secret is not None:
+        expected = f"Bearer {cron_secret.get_secret_value()}"
+
+        @app.api_route("/internal/reminders/tick", methods=["GET", "POST"], include_in_schema=False)
+        async def run_reminders(request: Request) -> JSONResponse:
+            """Entry point for an external scheduler (for example Vercel Cron)."""
+            supplied = request.headers.get("authorization", "")
+            if not secrets.compare_digest(supplied.encode(), expected.encode()):
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+            return JSONResponse({"delivered": await reminder_tick()})
+
     return app

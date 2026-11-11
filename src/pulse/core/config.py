@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import time
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +49,14 @@ class Settings(BaseSettings):
     orbit_view_max_range_days: int = Field(default=366, ge=1, le=3660)
     orbit_session_ttl_minutes: int = Field(default=60, ge=5, le=1440)
 
+    reminder_default_time: time = time(18, 0)
+    reminder_grace_minutes: int = Field(default=120, ge=1, le=720)
+    reminder_snooze_minutes: int = Field(default=60, ge=5, le=480)
+    reminder_max_send_failures: int = Field(default=3, ge=1, le=20)
+    reminder_poll_seconds: int = Field(default=60, ge=10, le=3600)
+    reminder_scheduler_enabled: bool = True
+    reminder_cron_secret: SecretStr | None = None
+
     database_host: str | None = None
     database_port: int = Field(default=5432, ge=1, le=65535)
     database_name: str | None = None
@@ -59,6 +68,13 @@ class Settings(BaseSettings):
         "You are PULSE, a concise and helpful internal assistant. Never claim that a "
         "timesheet operation succeeded unless the Orbit service confirms it."
     )
+
+    @field_validator("reminder_default_time", mode="before")
+    @classmethod
+    def _parse_reminder_time(cls, value: object) -> object:
+        if isinstance(value, str):
+            return time.fromisoformat(value.strip())
+        return value
 
     @property
     def teams_is_configured(self) -> bool:

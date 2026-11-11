@@ -47,3 +47,11 @@ class OrbitProviderError(OrbitError):
 
 class OrbitMutationUncertainError(OrbitError):
     """Raised when a create request may have reached Orbit before failing."""
+
+
+class ReminderDeliveryError(PulseError):
+    """Raised when a reminder could not be delivered to a Teams conversation."""
+
+
+class ReminderError(PulseError):
+    """Raised for expected reminder-setting failures that are safe to show the user."""

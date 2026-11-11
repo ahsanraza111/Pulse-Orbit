@@ -15,6 +15,7 @@ Groq.
 - Single-day and date-range bulk entry preparation with one explicit confirmation.
 - Read-only, paginated Orbit timesheet listing and entry details.
 - Confirmed edit and delete of the user's own draft entries.
+- Daily Monday-to-Friday timesheet reminders in each user's own chat, with a per-user time.
 - Explicit dependency injection through a composition root.
 - Unit and HTTP tests that do not require real credentials.
 - Product and phase documentation under `docs/`.
@@ -223,6 +224,30 @@ Nothing is sent to Orbit until the confirmation button is selected. If the entry
 changed in Orbit after review, PULSE refuses to apply the change, and a timeout is
 reported as needing verification and never retried. Pending changes are
 process-local. See [the Phase 5 specification](docs/phases/PHASE_05_ORBIT_EDIT_DELETE.md).
+
+## Timesheet reminders
+
+Every user who messages PULSE in their personal chat is enrolled automatically (no
+Orbit login needed) and gets a reminder card **Monday to Friday at 6:00 PM**
+(`PULSE_ORBIT_BUSINESS_TIMEZONE`). Each user can change their own time:
+
+```text
+orbit reminders              settings card with a time picker
+orbit reminders time 7:30 PM
+orbit reminders on
+orbit reminders off          requires an Orbit sign-in
+```
+
+The reminder card offers **Add entry**, **Snooze**, **Skip today**, and **Turn off
+reminders**. Turning reminders off needs an Orbit sign-in: signed-out users are shown the
+login card first and reminders are turned off right after they sign in. Run
+`alembic upgrade head` to create the `reminder_subscriptions` table.
+
+On a long-running host PULSE checks every minute itself. On a serverless host (for
+example Vercel) set `PULSE_REMINDER_SCHEDULER_ENABLED=false`, set
+`PULSE_REMINDER_CRON_SECRET`, and have the platform cron call
+`/internal/reminders/tick` every minute with `Authorization: Bearer <secret>`. See
+[the Phase 7 specification](docs/phases/PHASE_07_TIMESHEET_REMINDERS.md).
 
 ## Tests and lint
 
